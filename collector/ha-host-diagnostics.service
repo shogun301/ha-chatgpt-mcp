@@ -1,0 +1,49 @@
+[Unit]
+Description=Sanitized Home Assistant host diagnostics collector
+Documentation=file:/opt/ha-host-diagnostics/README.md
+After=docker.service network-online.target
+Wants=docker.service network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/ha-host-diagnostics.env
+ExecStart=/usr/bin/python3 /opt/ha-host-diagnostics/ha_host_diagnostics.py run
+Restart=on-failure
+RestartSec=10s
+User=root
+Group=root
+SupplementaryGroups=docker systemd-journal
+UMask=0027
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=default
+ProcSubset=all
+ReadWritePaths=/var/lib/ha-host-diagnostics
+ReadOnlyPaths=/proc /sys -/run/docker.sock
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=CAP_CHOWN
+AmbientCapabilities=
+TasksMax=64
+MemoryMax=192M
+CPUQuota=25%
+TimeoutStopSec=20s
+
+[Install]
+WantedBy=multi-user.target

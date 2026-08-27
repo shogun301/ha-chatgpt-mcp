@@ -1,0 +1,11 @@
+{
+  "domain": "solaredge_one_bridge",
+  "name": "SolarEdge Monitoring Bridge",
+  "codeowners": [],
+  "config_flow": true,
+  "documentation": "https://api-docs.solaredge.com/",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "requirements": [],
+  "version": "1.2.0"
+}

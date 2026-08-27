@@ -1,0 +1,8 @@
+{
+  "name": "ben-homeassistant-mcp-proxy",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "wrangler": "^4.124.0"
+  }
+}

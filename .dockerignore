@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.sqlite*
+secrets/
+data/
+logs/
+backups/
+.git/
+.pytest_cache/
+tests/test_deployment_security.py

@@ -1,0 +1,20 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "home-assistant-mcp-proxy",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-18",
+  "workers_dev": false,
+  "routes": [
+    {
+      "pattern": "mcp.example.com",
+      "custom_domain": true
+    }
+  ],
+  "vars": {
+    "ORIGIN_URL": "https://origin.example.com"
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  }
+}

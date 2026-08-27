@@ -1,0 +1,25 @@
+{
+    email {$ACME_EMAIL}
+    admin off
+}
+
+{$MCP_ORIGIN_HOST} {
+    encode zstd gzip
+    request_body {
+        max_size 1MB
+    }
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer"
+        -Server
+    }
+    @internal path /internal/*
+    respond @internal "Not found" 404
+    reverse_proxy 127.0.0.1:8000 {
+        transport http {
+            keepalive 30s
+        }
+        flush_interval -1
+    }
+}

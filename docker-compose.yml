@@ -1,0 +1,88 @@
+services:
+  ha-chatgpt-mcp:
+    image: ha-chatgpt-mcp:2.6.0
+    build:
+      context: .
+    container_name: ha-chatgpt-mcp
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?Set PUBLIC_BASE_URL}
+      FRONTEND_PUBLIC_URL: ${FRONTEND_PUBLIC_URL:?Set FRONTEND_PUBLIC_URL}
+      MCP_ALLOWED_HOSTS: ${MCP_ALLOWED_HOSTS:?Set MCP_ALLOWED_HOSTS}
+      HA_BASE_URL: ${HA_BASE_URL:-http://127.0.0.1:8123}
+      LAN_SUBNET: ${LAN_SUBNET:-192.0.2.0/24}
+      MCP_DISPLAY_NAME: ${MCP_DISPLAY_NAME:-Home Assistant MCP}
+      PRESENCE_ENTITY: ${PRESENCE_ENTITY:-person.primary_resident}
+      MOBILE_NOTIFY_SERVICE: ${MOBILE_NOTIFY_SERVICE:-mobile_app_primary_phone}
+      DEFAULT_VACUUM_ENTITY: ${DEFAULT_VACUUM_ENTITY:-vacuum.primary_vacuum}
+      SPRINKLER_ENTITY_PREFIX: ${SPRINKLER_ENTITY_PREFIX:-sprinkler_controller}
+      SPRINKLER_ZONE_COUNT: ${SPRINKLER_ZONE_COUNT:-3}
+      HA_TOKEN_FILE: /run/secrets/ha_token
+      OAUTH_PASSWORD_HASH_FILE: /run/secrets/oauth_password_hash
+      JWT_SECRET_FILE: /run/secrets/jwt_secret
+      ORIGIN_SHARED_SECRET_FILE: /run/secrets/origin_shared_secret
+      SOLAREDGE_CLIENT_ID_FILE: /run/secrets/solaredge_client_id
+      SOLAREDGE_CLIENT_SECRET_FILE: /run/secrets/solaredge_client_secret
+      SOLAREDGE_TOKEN_KEY_FILE: /run/secrets/solaredge_token_key
+      SOLAREDGE_BRIDGE_SECRET_FILE: /run/secrets/solaredge_bridge_secret
+      SOLAREDGE_TOKEN_STORE_PATH: /data/solaredge-token.enc
+      SOLAREDGE_REDIRECT_URI: ${SOLAREDGE_REDIRECT_URI:-}
+      SOLAREDGE_PORTAL_USERNAME_FILE: /run/secrets/solaredge_portal_username
+      SOLAREDGE_PORTAL_PASSWORD_FILE: /run/secrets/solaredge_portal_password
+      SOLAREDGE_PORTAL_SITE_ID_FILE: /run/secrets/solaredge_portal_site_id
+      SOLAREDGE_PORTAL_TIMEZONE: ${SOLAREDGE_PORTAL_TIMEZONE:-UTC}
+      DATABASE_PATH: /data/oauth.sqlite3
+      AUDIT_LOG_PATH: /logs/audit.jsonl
+      HA_CONFIG_PATH: /ha-config
+      BACKUP_PATH: /backups
+      HOST_DIAGNOSTICS_PATH: /host-diagnostics
+    volumes:
+      - ./secrets:/run/secrets:ro
+      - ./data:/data
+      - ./logs:/logs
+      - ./backups:/backups
+      - /opt/homeassistant/config:/ha-config:ro
+      - type: bind
+        source: /var/lib/ha-host-diagnostics/export
+        target: /host-diagnostics
+        read_only: true
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    security_opt:
+      - no-new-privileges:true
+    # Retained for existing read-only HA configuration reads. The diagnostics
+    # export is independently restricted to the service's primary GID 10001.
+    group_add:
+      - "0"
+    cap_drop:
+      - ALL
+
+  cloudflared:
+    image: cloudflare/cloudflared:2025.8.1
+    container_name: ha-chatgpt-cloudflared
+    network_mode: host
+    restart: unless-stopped
+    user: "10001:10001"
+    command:
+      - tunnel
+      - --no-autoupdate
+      - --loglevel
+      - info
+      - --metrics
+      - 127.0.0.1:49312
+      - run
+      - --token-file
+      - /run/secrets/cloudflared_tunnel_token
+    volumes:
+      - ./secrets/cloudflared_tunnel_token:/run/secrets/cloudflared_tunnel_token:ro
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL

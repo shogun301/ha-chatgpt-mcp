@@ -1,0 +1,40 @@
+{
+  "config": {
+    "abort": {
+      "single_instance_allowed": "Only one SolarEdge Monitoring Bridge can be configured."
+    },
+    "error": {
+      "cannot_connect": "Unable to connect to the local bridge",
+      "invalid_auth": "The shared secret was rejected",
+      "invalid_endpoint": "Enter a local or private bridge URL"
+    },
+    "step": {
+      "user": {
+        "data": {
+          "endpoint": "Local snapshot endpoint",
+          "shared_secret": "Shared secret"
+        },
+        "description": "Connect Home Assistant to the local, read-only SolarEdge Monitoring bridge.",
+        "title": "SolarEdge Monitoring Bridge"
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "battery_charge_energy_kwh": {"name": "Battery energy charged"},
+      "battery_charge_power_w": {"name": "Battery charging power"},
+      "battery_discharge_energy_kwh": {"name": "Battery energy discharged"},
+      "battery_discharge_power_w": {"name": "Battery discharging power"},
+      "battery_state_of_energy_pct": {"name": "Battery state of energy"},
+      "consumption_energy_kwh": {"name": "Consumption energy"},
+      "consumption_power_w": {"name": "Consumption power"},
+      "grid_export_energy_kwh": {"name": "Grid export energy"},
+      "grid_export_power_w": {"name": "Grid export power"},
+      "grid_import_energy_kwh": {"name": "Grid import energy"},
+      "grid_import_power_w": {"name": "Grid import power"},
+      "production_energy_kwh": {"name": "Production energy"},
+      "production_power_w": {"name": "Production power"},
+      "storage_operating_plan": {"name": "Storage operating plan"}
+    }
+  }
+}
