@@ -55,6 +55,7 @@ from .solaredge import (
     SolarEdgeError,
     SolarEdgeOAuthManager,
 )
+from .solaredge_filter import SolarEdgeSnapshotFilter
 from .solaredge_portal import (
     SolarEdgePortalClient,
     SolarEdgePortalConfig,
@@ -66,7 +67,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 LOGGER = logging.getLogger("ha_chatgpt_mcp")
-SERVER_VERSION = "2.6.0"
+SERVER_VERSION = "2.6.1"
 audit = AuditLog(config.AUDIT_LOG_PATH)
 oauth = OAuthServer(
     OAuthStore(config.DATABASE_PATH),
@@ -133,6 +134,8 @@ def _build_solaredge_portal() -> SolarEdgePortalClient | None:
 solaredge_portal = _build_solaredge_portal()
 _solaredge_lifetime_cache: tuple[float, dict[str, Any]] | None = None
 _SOLAREDGE_LIFETIME_CACHE_SECONDS = 30 * 60
+_solaredge_snapshot_filter = SolarEdgeSnapshotFilter()
+_solaredge_snapshot_filter_lock = asyncio.Lock()
 
 claims_context: ContextVar[dict[str, Any] | None] = ContextVar(
     "claims_context", default=None
@@ -4359,6 +4362,14 @@ async def internal_solaredge_snapshot(request: Request) -> Response:
             },
             status_code=503,
         )
+    async with _solaredge_snapshot_filter_lock:
+        snapshot, filter_action = _solaredge_snapshot_filter.apply(snapshot)
+    if filter_action == "suppressed_first_near_zero":
+        LOGGER.warning("solaredge_bridge_transient_near_zero_suppressed")
+    elif filter_action == "confirmed_near_zero":
+        LOGGER.warning("solaredge_bridge_near_zero_confirmed")
+    elif filter_action == "recovered_after_suppression":
+        LOGGER.info("solaredge_bridge_recovered_after_suppressed_snapshot")
     return JSONResponse(snapshot)
 
 

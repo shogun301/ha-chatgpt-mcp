@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.6.1 - 2026-08-27
+
+- Added a timestamp-deduplicated SolarEdge bridge filter that omits all six
+  instantaneous power metrics for one abrupt strong-to-near-zero observation.
+  A distinct second low observation is accepted so sustained outages remain
+  visible after one five-minute confirmation interval.
+- The filter preserves current cumulative energy, battery state of energy, and
+  storage-plan data while the suspect power tuple is omitted, and serializes
+  transitions so duplicate provider-cache reads cannot confirm an outage.
+
 ## 2.6.0 - 2026-08-27
 
 - Added a persistent five-minute Home Assistant service-registry synchronizer.

@@ -32,7 +32,7 @@ DIAGNOSTIC_TOOLS = (
     "list_lan_nodes",
     "probe_lan_node",
 )
-EXPECTED_VERSION = "2.6.0"
+EXPECTED_VERSION = "2.6.1"
 EXPECTED_TOOL_COUNT = 99
 NEW_CAPABILITY_TOOLS = {
     "get_capability_sync_status",

@@ -1,6 +1,6 @@
 # Home Assistant MCP service
 
-Version 2.6.0 exposes 99 typed MCP tools, including seven privileged, read-only
+Version 2.6.1 exposes 99 typed MCP tools, including seven privileged, read-only
 host and LAN diagnostic tools. The service keeps the Home Assistant API private, uses OAuth
 for the public MCP transport, and provides bounded Home Assistant, host,
 container, and route evidence without exposing a general administration
