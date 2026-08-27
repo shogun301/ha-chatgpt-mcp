@@ -1,158 +1,344 @@
-# Home Assistant MCP service
+<!-- markdownlint-disable MD013 -->
 
-Version 2.6.1 exposes 99 typed MCP tools, including seven privileged, read-only
-host and LAN diagnostic tools. The service keeps the Home Assistant API private, uses OAuth
-for the public MCP transport, and provides bounded Home Assistant, host,
-container, and route evidence without exposing a general administration
-interface.
+# Home Assistant MCP
 
-The three LAN tools (`get_lan_gateway_status`, `list_lan_nodes`, and
-`probe_lan_node`) operate only on opaque `node-001` through `node-254` IDs in
-the configured fixed `/24` subnet. They accept a closed list of ten TCP services, cap scan
-output at 100 nodes and concurrency at 64 probes, send no application payload,
-and expose no arbitrary address, port, URL, shell, or device-control input.
-Raw LAN addresses are deliberately omitted from results.
+[![Public safety](https://github.com/shogun301/ha-chatgpt-mcp/actions/workflows/public-safety.yml/badge.svg)](https://github.com/shogun301/ha-chatgpt-mcp/actions/workflows/public-safety.yml)
+
+An OAuth-protected
+[Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server for
+securely connecting ChatGPT, Codex, and other MCP clients to Home Assistant.
+
+The project exposes 99 typed tools for discovery, dashboards, schedules,
+climate, energy, media, cleaning, irrigation, automations, diagnostics, and
+carefully bounded device control. It keeps Home Assistant's API private and
+deliberately avoids becoming a generic shell, log reader, network scanner, or
+unrestricted service proxy.
+
+> [!IMPORTANT] This is a security-sensitive reference implementation for a
+> self-hosted Home Assistant installation. Read the
+> [security model](#security-model), replace every example value, and review the
+> allowlists before connecting it to a real home.
+
+## Highlights
+
+- **Typed Home Assistant access:** entities, devices, areas, history, weather,
+  calendars, schedules, statistics, integrations, dashboards, to-do lists,
+  automations, backups, and system health.
+- **Bounded writes:** climate, lights, scenes, media players, vacuums, covers,
+  locks, sirens, notifications, dashboards, schedules, calendars, to-do items,
+  and automations use validated inputs and narrow service allowlists.
+- **Sprinkler support:** live controller status, zone metadata, configuration,
+  watering history, telemetry refresh, zone or sequence starts, and idempotent
+  stop operations.
+- **Energy and SolarEdge:** production, module comparison, power flow, energy
+  breakdowns, storage summaries, telemetry, alerts, and an optional Home
+  Assistant bridge integration.
+- **Persistent capability sync:** compares Home Assistant's current service
+  registry with the reviewed release baseline every five minutes and reports
+  drift without dynamically exposing new writes.
+- **Sanitized diagnostics:** optional fixed-route, host/runtime, outage, and
+  fixed-subnet LAN evidence with strict limits and no raw addresses, arbitrary
+  targets, commands, or device control.
+- **OAuth-native remote access:** authorization code flow with S256 PKCE,
+  dynamic client registration, scoped access tokens, and MCP resource metadata.
+
+Version **2.6.1** currently advertises **99 tools**. See
+[CHANGELOG.md](CHANGELOG.md) for release history.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Client[ChatGPT, Codex, or MCP client]
+    Edge[HTTPS edge<br/>Cloudflare Worker, tunnel, or reverse proxy]
+    MCP[Home Assistant MCP<br/>OAuth + typed tools]
+    HA[Private Home Assistant API]
+    Data[(OAuth, audit, and<br/>capability-sync state)]
+    Collector[Optional root-owned<br/>diagnostics collector]
+    Export[Sanitized read-only export]
+
+    Client -->|HTTPS + OAuth/PKCE| Edge
+    Edge -->|loopback or shared-secret origin| MCP
+    MCP -->|long-lived service token| HA
+    MCP --> Data
+    Collector --> Export --> MCP
+```
+
+The reference deployment binds the MCP service to `127.0.0.1:8000`. Only the
+HTTPS edge is public. Home Assistant can remain local to the host or reachable
+over a private network.
+
+## Tool surface
+
+| Area                      | Examples                                                                  | Access                                   |
+| ------------------------- | ------------------------------------------------------------------------- | ---------------------------------------- |
+| Home model                | Entities, devices, areas, registry, history, weather                      | Read                                     |
+| Dashboards and statistics | List/read/create/update dashboards; long-term statistics                  | Read/write                               |
+| Climate and schedules     | Targets, modes, fan modes, presets, weekly schedules, time helpers        | Read/write                               |
+| Media and cleaning        | Browse/play media, TTS, Cast dashboards, vacuum rooms and fan speed       | Read/write                               |
+| Irrigation                | Summary, zones, configuration, history, refresh, run, sequence, stop      | Read/write                               |
+| Organization              | Calendars, to-do lists, automations, notifications                        | Read/write                               |
+| Energy                    | SolarEdge summaries, power flow, storage, telemetry, and alerts           | Read; optional authorization write       |
+| Operations                | Backups, capability drift, fixed routes, host/runtime, outages, LAN nodes | Read; backup creation is confirmed write |
+
+Higher-risk actions are annotated as destructive and require an explicit
+confirmation argument. The exact registry is authoritative; inspect it from an
+authenticated MCP client after deployment.
+
+## Requirements
+
+- Home Assistant reachable from the MCP host.
+- A dedicated Home Assistant long-lived access token. Use a separate service
+  identity when possible.
+- Python 3.12 or newer and [uv](https://docs.astral.sh/uv/) for development and
+  tests.
+- Docker with Compose for the reference container deployment.
+- A public HTTPS URL for remote MCP clients.
+- An HTTPS edge that reaches the MCP over loopback or injects the configured
+  origin shared secret. The included Caddy and Cloudflare examples demonstrate
+  those two patterns.
+- Linux and systemd only if using the optional host diagnostics collector.
+
+The bundled Compose file is a production reference, not a universal one-command
+installer. It assumes host networking, an existing Home Assistant configuration
+at `/opt/homeassistant/config`, and an installed diagnostics export at
+`/var/lib/ha-host-diagnostics/export`. Adapt those mounts to your installation
+without exposing the Home Assistant API or Docker socket.
+
+## Quick start for development
+
+Clone the repository and install the locked dependencies:
+
+```bash
+git clone https://github.com/shogun301/ha-chatgpt-mcp.git
+cd ha-chatgpt-mcp
+uv sync --frozen
+```
+
+The test suite and public-source audit do not need production credentials:
+
+```bash
+uv run python scripts/public_release_audit.py --history
+uv run --with pytest python -m pytest tests collector/tests home_assistant/tests
+```
+
+To run the service, copy `.env.example` to an ignored `.env`, replace every
+example domain and entity ID, and provide the required runtime paths and secret
+files described below. The application does not automatically load `.env`;
+export the variables in your process manager, use `uvicorn --env-file .env`, or
+let Docker Compose load it.
+
+For a local process after configuring the environment:
+
+```bash
+uv run uvicorn app.server:app --host 127.0.0.1 --port 8000 --no-proxy-headers
+```
+
+For the reference container deployment after adapting its mounts and optional
+integrations:
+
+```bash
+docker compose build --pull
+docker compose up -d
+curl --fail http://127.0.0.1:8000/healthz
+```
+
+Do not bind Uvicorn directly to a public interface.
+
+## Configuration
+
+### Core settings
+
+| Variable                | Purpose                                                                                  |
+| ----------------------- | ---------------------------------------------------------------------------------------- |
+| `PUBLIC_BASE_URL`       | Public HTTPS base URL for the MCP service; clients connect to `/mcp`.                    |
+| `FRONTEND_PUBLIC_URL`   | Public Home Assistant frontend URL used only by fixed-route diagnostics.                 |
+| `MCP_ALLOWED_HOSTS`     | Comma-separated public hostnames accepted by the transport.                              |
+| `HA_BASE_URL`           | Private Home Assistant origin, such as `http://127.0.0.1:8123`.                          |
+| `MCP_LOCAL_BASE_URL`    | Loopback MCP origin used by fixed-route comparisons.                                     |
+| `MCP_DISPLAY_NAME`      | Name shown in OAuth and MCP metadata.                                                    |
+| `DATABASE_PATH`         | Writable SQLite path for OAuth state.                                                    |
+| `AUDIT_LOG_PATH`        | Writable JSONL audit path.                                                               |
+| `HA_CONFIG_PATH`        | Read-only Home Assistant configuration mount used for safe backups and reads.            |
+| `BACKUP_PATH`           | Writable directory for pre-change configuration backups.                                 |
+| `HOST_DIAGNOSTICS_PATH` | Read-only sanitized collector export; optional diagnostics report unavailable if absent. |
+
+Entity-specific variables in `.env.example` map the generic tool surface to one
+deployment's presence, notification, vacuum, sprinkler, thermostat, and schedule
+entities. Keep real entity IDs in local configuration, not in Git.
+
+### Required secret files
+
+The server reads secrets from files rather than environment values:
+
+| Variable                    | File contents                                     |
+| --------------------------- | ------------------------------------------------- |
+| `HA_TOKEN_FILE`             | Dedicated Home Assistant long-lived access token. |
+| `OAUTH_PASSWORD_HASH_FILE`  | Argon2 hash for the human OAuth sign-in password. |
+| `JWT_SECRET_FILE`           | Random secret used to sign access tokens.         |
+| `ORIGIN_SHARED_SECRET_FILE` | Random secret shared only with the HTTPS edge.    |
+
+Generate random values with a cryptographically secure generator. An Argon2
+password hash can be produced without placing the password in shell history:
+
+```bash
+uv run python -c "from argon2 import PasswordHasher; from getpass import getpass; print(PasswordHasher().hash(getpass('OAuth password: ')))"
+uv run python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+Store the outputs in separate files with owner-only permissions. Never commit
+`secrets/`, `.env`, tokens, passwords, hashes, private domains, entity
+inventories, schedules, or network topology.
+
+### Optional SolarEdge configuration
+
+SolarEdge support uses optional client credentials, an encrypted token store,
+bridge secret, redirect URI, and guarded portal fallback credentials. If you do
+not use SolarEdge, omit the corresponding `SOLAREDGE_*_FILE` variables. The
+reference Compose file sets those paths, so either provide the files or remove
+those entries in your local override.
+
+### OAuth scopes
+
+- `mcp:read` permits read tools.
+- `mcp:write` permits the reviewed write surface and also satisfies the current
+  strongest compatibility grant.
+- `mcp:diagnostics`, together with `mcp:read`, permits privileged read-only host
+  and LAN diagnostics without granting device writes.
+
+Connect clients to `https://your-mcp-host.example/mcp`. The server publishes
+OAuth authorization-server, protected-resource, OpenID configuration, and
+dynamic client-registration metadata under the same origin.
+
+## Edge options
+
+The application requires non-loopback requests to carry the configured origin
+shared secret. Two examples are included:
+
+- [`cloudflare/`](cloudflare/) contains a narrow Cloudflare Worker proxy. It
+  forwards only the MCP, OAuth, health, and SolarEdge callback paths, enforces a
+  1 MiB request limit, adds the origin secret, and strips unnecessary headers.
+- [`Caddyfile`](Caddyfile) provides a same-host HTTPS reverse proxy to the
+  loopback MCP listener.
+
+The included `cloudflared` service uses a token file and publishes metrics on
+loopback only. Replace all example routes and keep the MCP origin, Home
+Assistant API, and metrics listener off the public network.
 
 ## Capability synchronization
 
-The service polls Home Assistant's service registry every five minutes and
-persists a release-bound compatibility baseline in `/data/ha-capability-sync.json`.
-Added or removed services and field/required-field schema changes remain visible
-through `get_capability_sync_status` across MCP restarts. Deploying a reviewed
-new MCP version acknowledges the then-current Home Assistant surface and starts
-the next drift window. The monitor never invokes a Home Assistant service and
-does not dynamically expose unreviewed writes.
+Home Assistant integrations can add or remove services independently of this
+project. The server therefore polls Home Assistant's service registry every five
+minutes and persists a release-bound baseline in
+`/data/ha-capability-sync.json`.
 
-## Host diagnostics architecture
+`get_capability_sync_status` reports added or removed services and field-schema
+changes across restarts. The monitor is deliberately observational: it never
+calls a service and never turns an unreviewed Home Assistant service into a new
+MCP write tool. New functionality should be reviewed, implemented as typed
+tools, tested, and released through Git.
 
-A boot-enabled, root-owned systemd collector runs independently of Home
-Assistant and the MCP container. Its code is installed under
-`/opt/ha-host-diagnostics`; persistent state and sanitized exports live under
-`/var/lib/ha-host-diagnostics`.
+## Optional host and LAN diagnostics
 
-The collector has no listener and accepts no caller-selected path, command,
-container, service, log expression, or URL. It reads only compiled-in Docker,
-procfs/cgroup, journal, and fixed endpoint sources. The MCP container receives
-only the sanitized export directory through a fixed read-only bind mount. It
-does not receive the Docker socket, host journals, systemd control, or a host
-write path.
+The systemd collector under [`collector/`](collector/) has no listener and
+accepts no caller-selected command, path, container, log expression, or URL. It
+publishes bounded, sanitized snapshots and ledgers to a fixed directory. The MCP
+container receives only that directory as a read-only mount—never the Docker
+socket, host journal, procfs, sysfs, or systemd control.
 
-The collector writes an atomic current snapshot every 60 seconds. The MCP
-reader reports the exact snapshot age and marks it stale after 180 seconds
-(three missed collection intervals). Daily event and sample ledgers use a
-eight-segment UTC retention window (current day plus seven completed days),
-with a one-time bounded eight-day historical backfill. Each ledger is capped
-at 1.75 MiB, the current snapshot at 256 KiB, and all exported ledgers together
-at 32 MiB; aggregate pressure stops appends and marks truncation without
-removing in-window evidence. After backfill, fixed event sources are polled with a
-two-minute overlap and stable deduplication so short-lived transitions survive
-between snapshots. Root-only state stores source cursors and the key used to
-hash runtime identities; raw IDs and raw logs are not exported.
+The LAN tools operate only inside one configured `/24`, return opaque node IDs,
+use a closed TCP-service allowlist, send no application payload, and omit raw
+addresses. They cannot scan arbitrary networks or control devices.
 
-## Diagnostic tools
+See [docs/operations.md](docs/operations.md) and
+[collector/README.md](collector/README.md) for the full data model, retention
+limits, deployment, verification, incident, and rollback procedures.
 
-All four tools are annotated read-only and require `mcp:read` plus either the
-dedicated least-privilege `mcp:diagnostics` scope or the existing strongest
-`mcp:write` connection scope. Read-only, write-only, and diagnostics-only grants
-are rejected. The legacy default remains `mcp:read mcp:write`; a new
-least-privilege diagnostics client should request
-`mcp:read mcp:diagnostics`. Calls are audited by tool name and bounded input
-metadata plus status/count flags only; returned diagnostic evidence and
-authentication material are not logged.
+## Security model
 
-### `get_host_runtime_health`
+This server is intentionally narrower than the Home Assistant API:
 
-No inputs. Returns the observation time, collector status and freshness,
-host boot/uptime and resource data, fixed runtime/container state and start
-times, restart policy/count, current exit/OOM evidence, limits, cgroup counters,
-local reachability, evidence completeness, and unavailable sources.
+- No shell execution, arbitrary WebSocket passthrough, arbitrary files, raw
+  logs, Docker administration, service restart, shutdown, credential retrieval,
+  camera imagery, or alarm disarming.
+- Generic Home Assistant service calls are allowlisted by domain and service;
+  dedicated typed tools are preferred.
+- Inputs are schema-validated, result sizes are bounded, and sensitive
+  diagnostic fields are recursively redacted.
+- Destructive or physical operations use explicit annotations and confirmation
+  gates.
+- Audit records contain tool names and bounded metadata, not credentials or
+  returned diagnostic evidence.
+- The container runs as an unprivileged user with a read-only filesystem, all
+  Linux capabilities dropped, and `no-new-privileges` enabled.
+- The public-release audit scans both the current tree and Git history before
+  publication.
 
-### `get_restart_outage_diagnostics`
+Never use a thermostat, light, lock, vacuum, sprinkler, camera, speaker,
+television, backup, notification, or other physical side effect as a
+connectivity test.
 
-Accepts either `since_hours` (default 24, greater than 0 and at most 168) or
-both `start_time` and `end_time` as strict UTC RFC 3339 timestamps. These forms
-cannot be combined. `limit` defaults to 100 and must be 1 through 200. Returns
-classified lifecycle/outage events, at most 60 bounded resource samples,
-per-source availability, completeness, and explicit truncation.
+For vulnerability reporting and handling of sensitive deployment information,
+read [SECURITY.md](SECURITY.md).
 
-Cause values are:
+## Deployment and verification
 
-`oom_kill`, `process_crash`, `operator_restart`, `deployment_restart`,
-`host_reboot`, `docker_restart`, `watchdog_restart`, `tunnel_failure`,
-`endpoint_failure`, and `unknown`.
+The PowerShell deployment script in
+[`scripts/deploy-production.ps1`](scripts/deploy-production.ps1) is an
+opinionated AWS Lightsail reference. It requires explicit AWS profile, region,
+instance, frontend URL, and MCP URL parameters; packages the reviewed source;
+creates backups; deploys the collector and container; runs verification; and
+supports rollback. Review it carefully before adapting it to another host.
 
-Exit code 137 alone is not classified as an OOM kill. Direct Docker, kernel, or
-cgroup evidence is required. Likewise, operator, deployment, and watchdog
-attribution requires a matching direct marker; otherwise the cause remains
-`unknown`.
+Before every public push or production release:
 
-### `list_diagnostic_events`
+```bash
+uv sync --frozen
+uv run python scripts/public_release_audit.py --history
+uv run --with pytest python -m pytest tests collector/tests home_assistant/tests
+```
 
-Uses the same bounded window and `limit`. Optional `components` and
-`severities` inputs are enum lists, never free-form searches. Component lists
-contain at most 10 entries and severity lists at most 4.
+Then verify, without changing device state:
 
-Components:
+1. `/healthz` succeeds locally and through the public edge.
+2. Unauthenticated and invalid-token MCP requests are rejected.
+3. Authenticated discovery reports the expected version and tool count.
+4. Read-only overview, capability-sync, route, and integration checks succeed.
+5. The public Git commit, deployed artifact, and reported service version are
+   identical.
 
-`home_assistant`, `mcp`, `docker`, `kernel`, `cgroup`, `systemd`,
-`cloudflare_tunnel`, `wireguard`, `reverse_proxy`, `endpoint_probe`.
+Production procedures and rollback gates are detailed in
+[docs/operations.md](docs/operations.md).
 
-Severities: `info`, `warning`, `error`, `critical`.
+## Contributing
 
-Each event contains only a UTC timestamp, component, severity, event type,
-sanitized summary, bounded evidence fields, evidence category, cause, and
-complete/truncated/inferred flags. The result also reports its effective
-window, filters, count, source-file completeness, and truncation.
+Issues and pull requests are welcome when they preserve the project's bounded
+security model.
 
-### `get_fixed_route_health`
+For new tools:
 
-No inputs and no arbitrary URL support. It checks only the configured
-`FRONTEND_PUBLIC_URL` and `PUBLIC_BASE_URL` routes, keeping results separate. Each route
-reports safe DNS success, TLS validity/expiration, HTTP status and latency,
-expected authentication behavior, and local-origin comparison. The frontend
-also reports bootstrap and safe WebSocket-greeting reachability; the MCP route
-reports protocol/auth-gate reachability. Collector-owned tunnel state is
-included when available, including the connected-replica count read from the
-fixed loopback-only Cloudflare metrics listener on port 49312. DNS answers never
-include addresses.
+1. Prefer a narrow typed operation over generic passthrough.
+2. Define read-only, idempotent, write, or destructive annotations accurately.
+3. Validate entity domains, enums, lengths, time windows, and result limits.
+4. Require explicit confirmation for consequential physical or administrative
+   actions.
+5. Add authorization, negative-path, redaction, and regression tests.
+6. Update capability documentation and run the public history audit.
 
-## Security boundary
+Do not include real household configuration, private URLs, credentials, logs,
+tokens, schedules, topology, or provider responses in an issue, fixture,
+screenshot, commit, or pull request.
 
-Diagnostic output is allowlisted, size-bounded, recursively sanitized, and
-serialized through a second redaction boundary. It excludes credentials,
-tokens, cookies, headers, environment variables, addresses, hardware
-identifiers, cloud resource identifiers, usernames, home paths, configuration
-contents, process arguments, signed query strings, stack traces, and raw
-provider responses.
+## License
 
-The tools cannot retrieve arbitrary logs, read arbitrary files, run shell
-commands, administer Docker, restart services, open ports, or change Home
-Assistant/device state. Fixed probes use only read-only HTTP/TLS/DNS/WebSocket
-operations. No public listener, firewall rule, tunnel route, or broad host
-privilege is added for diagnostics.
+No open-source license is currently included. Public visibility does not grant
+permission to copy, modify, or redistribute the code. Repository owners should
+add an explicit license before accepting reuse or redistribution.
 
-## Incident workflow
+## References
 
-1. Call `get_home_overview` to establish current MCP-to-Home-Assistant health.
-2. Call `get_fixed_route_health` to compare each public route with its local
-   origin.
-3. Call `get_restart_outage_diagnostics` for the smallest relevant UTC window.
-4. Use `list_diagnostic_events` only when the structured restart result needs
-   more event detail.
-5. Report confirmed evidence, supported inference, and unresolved gaps
-   separately. A currently healthy server with no matching host event may
-   support a transient client/network failure, but does not prove its cause.
-
-Never change a thermostat, light, lock, vacuum, sprinkler, camera, television,
-router, or other device as a connectivity test.
-
-See [docs/operations.md](docs/operations.md) for deployment, verification,
-rollback, and incident procedures, and [CHANGELOG.md](CHANGELOG.md) for release
-notes.
-
-## External references
-
+- [Model Context Protocol](https://modelcontextprotocol.io/)
 - [OpenAI: Build an MCP server](https://developers.openai.com/plugins/build/mcp-server)
 - [OpenAI: Authenticate users](https://developers.openai.com/plugins/build/auth)
-- [Cloudflare: Monitor tunnels](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/monitor-tunnels/)
-- [Cloudflare: Tunnel metrics](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/monitor-tunnels/metrics/)
+- [Cloudflare Tunnel monitoring](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/monitor-tunnels/)
+- [Cloudflare Tunnel metrics](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/monitor-tunnels/metrics/)
