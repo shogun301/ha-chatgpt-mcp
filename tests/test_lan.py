@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from typing import get_args
 from unittest.mock import AsyncMock, patch
 
 _temporary_root = tempfile.TemporaryDirectory()
@@ -46,6 +47,7 @@ from app.lan import (
     normalize_services,
 )
 from app.server import (
+    LanService,
     claims_context,
     get_lan_gateway_status,
     lan_diagnostics,
@@ -129,6 +131,9 @@ class LanProbeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LanToolSurfaceTests(unittest.IsolatedAsyncioTestCase):
+    def test_schema_service_names_match_the_closed_backend_allowlist(self) -> None:
+        self.assertEqual(set(get_args(LanService)), set(SERVICE_PORTS))
+
     async def test_tools_require_diagnostics_scope_and_audit_safe_fields(self) -> None:
         token = claims_context.set({"scope": "mcp:read"})
         try:

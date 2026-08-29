@@ -32,6 +32,7 @@ DIAGNOSTIC_TOOLS = (
     "list_lan_nodes",
     "probe_lan_node",
 )
+LAN_PROBE_SERVICES = ("dns", "router_ssh")
 EXPECTED_VERSION = "2.6.2"
 EXPECTED_TOOL_COUNT = 99
 NEW_CAPABILITY_TOOLS = {
@@ -176,7 +177,7 @@ async def _session(scope: str, *, diagnostics_allowed: bool) -> dict[str, Any]:
                     elif name == "probe_lan_node":
                         arguments = {
                             "node_id": "node-001",
-                            "services": ["dns", "asus_ssh"],
+                            "services": list(LAN_PROBE_SERVICES),
                         }
                     result = await session.call_tool(name, arguments)
                     is_error = bool(getattr(result, "is_error", False))

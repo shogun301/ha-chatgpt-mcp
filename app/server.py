@@ -375,7 +375,7 @@ LanService = Literal[
     "rtsp",
     "ipp",
     "mqtt",
-    "asus_ssh",
+    "router_ssh",
     "cast_http",
     "cast_tls",
     "jetdirect",

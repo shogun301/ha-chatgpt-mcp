@@ -35,7 +35,12 @@ os.environ.update(
 for _directory in ("ha-config", "backups", "host-diagnostics"):
     (_root / _directory).mkdir()
 
-from scripts.production_mcp_verify import _access_token, _transport_streams
+from app.lan import SERVICE_PORTS
+from scripts.production_mcp_verify import (
+    LAN_PROBE_SERVICES,
+    _access_token,
+    _transport_streams,
+)
 
 
 class ProductionVerifierCompatibilityTests(unittest.TestCase):
@@ -76,3 +81,6 @@ class ProductionVerifierCompatibilityTests(unittest.TestCase):
         self.assertNotIn('session.call_tool("run_sprinkler_zone"', source)
         self.assertNotIn('session.call_tool("run_sprinkler_sequence"', source)
         self.assertNotIn('session.call_tool("stop_sprinklers"', source)
+
+    def test_verifier_uses_only_canonical_lan_services(self) -> None:
+        self.assertTrue(set(LAN_PROBE_SERVICES).issubset(SERVICE_PORTS))
