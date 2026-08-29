@@ -13,6 +13,20 @@ dependencies = [
   "uvicorn[standard]>=0.35,<1",
 ]
 
+[build-system]
+requires = ["setuptools>=80,<83"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app", "app.*", "collector", "collector.*", "home_assistant.*"]
+exclude = ["tests", "tests.*", "collector.tests", "home_assistant.tests", "cloudflare", "cloudflare.*"]
+namespaces = true
+
+[tool.setuptools.package-data]
+collector = ["README.md", "ha-host-diagnostics.service"]
+"home_assistant.custom_components.solaredge_one_bridge" = ["manifest.json", "strings.json", "translations/*.json"]
+
 [dependency-groups]
 dev = ["pytest>=9,<10"]
 

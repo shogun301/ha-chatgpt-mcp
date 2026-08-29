@@ -151,6 +151,25 @@ def verify_manifests() -> list[str]:
                 if str(value).startswith(("file:", "workspace:")):
                     raise AssertionError(f"unsupported local package reference: {name}={value}")
         references.append("cloudflare/package.json")
+    package_find = project.get("tool", {}).get("setuptools", {}).get("packages", {}).get("find", {})
+    expected_include = {"app", "app.*", "collector", "collector.*", "home_assistant.*"}
+    expected_exclude = {
+        "tests", "tests.*", "collector.tests", "home_assistant.tests",
+        "cloudflare", "cloudflare.*",
+    }
+    if set(package_find.get("include", [])) != expected_include:
+        raise AssertionError("Python package discovery include set is not explicit or complete")
+    if set(package_find.get("exclude", [])) != expected_exclude:
+        raise AssertionError("Python package discovery exclude set is not fail-closed")
+    package_data = project.get("tool", {}).get("setuptools", {}).get("package-data", {})
+    expected_data = {
+        "collector": {"README.md", "ha-host-diagnostics.service"},
+        "home_assistant.custom_components.solaredge_one_bridge": {
+            "manifest.json", "strings.json", "translations/*.json",
+        },
+    }
+    if {key: set(value) for key, value in package_data.items()} != expected_data:
+        raise AssertionError("Python package-data manifest is stale or incomplete")
     return references
 
 
