@@ -42,6 +42,7 @@ from app.server import (
     SprinklerExactSequenceEntry,
     _controller_from_snapshot,
     _run_intervals,
+    _zone_model,
     claims_context,
     get_sprinkler_capabilities,
     get_sprinkler_command_status,
@@ -74,6 +75,22 @@ class _SensitiveTypedOutput(BaseModel):
 
 
 class SprinklerContractTests(unittest.TestCase):
+    def test_empty_zone_event_placeholders_are_omitted_defensively(self) -> None:
+        zone = _zone_model(
+            {
+                "zone": 1,
+                "enabled": True,
+                "recent_events": [
+                    {},
+                    {"evidence_type": "controller-reported"},
+                    {"event_id": "real-event", "event_type": "watering"},
+                ],
+            }
+        )
+
+        self.assertEqual(len(zone.recent_events), 1)
+        self.assertEqual(zone.recent_events[0].event_id, "real-event")
+
     def test_new_tools_advertise_structured_output_schemas(self) -> None:
         tools = {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
         expected = {

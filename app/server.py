@@ -3748,6 +3748,21 @@ def _zone_event(item: dict[str, Any]) -> ZoneEvent:
     )
 
 
+def _zone_event_has_signal(item: dict[str, Any]) -> bool:
+    """Reject upstream placeholder objects that contain no event signal."""
+    return any(
+        item.get(key) is not None
+        for key in (
+            "event_id",
+            "event_type",
+            "state",
+            "reason",
+            "occurred_at",
+            "source",
+        )
+    )
+
+
 def _watering_state_value(value: Any) -> tuple[str, bool]:
     """Normalize a tri-state watering signal without losing explicit false."""
     if isinstance(value, bool):
@@ -3823,7 +3838,7 @@ def _zone_model(record: dict[str, Any]) -> ZoneCapability:
         recent_events=[
             _zone_event(item)
             for item in record.get("recent_events") or []
-            if isinstance(item, dict)
+            if isinstance(item, dict) and _zone_event_has_signal(item)
         ],
         last_updated=record.get("last_updated"),
     )

@@ -154,6 +154,28 @@ def test_zone_entity_attributes_expose_rich_fields_and_bound_events() -> None:
     assert "opaque" not in repr(attributes)
 
 
+def test_empty_zone_event_placeholders_are_omitted() -> None:
+    normalized = data.normalize_zone(
+        {
+            "zone_number": 1,
+            "latest_events": [
+                {},
+                {"evidence_type": "controller-reported"},
+                {"id": "real-event", "type": "watering"},
+            ],
+        }
+    )
+
+    assert normalized["latest_events"] == [
+        {
+            "event_id": "real-event",
+            "event_type": "watering",
+            "evidence_type": "controller-reported",
+        }
+    ]
+    assert data.zone_entity_attributes({"latest_events": [{}, {}]}) == {}
+
+
 def test_schedule_runs_preserve_rich_per_zone_semantics_and_utc() -> None:
     now = datetime(2026, 8, 29, 12, 30, tzinfo=timezone.utc)
     response = {

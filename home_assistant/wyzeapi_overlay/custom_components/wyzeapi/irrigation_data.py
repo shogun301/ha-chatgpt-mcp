@@ -176,7 +176,7 @@ def _alias_value(source: dict[str, Any], aliases: tuple[str, ...]) -> Any:
     return None
 
 
-def _normalize_event(event: Any) -> dict[str, Any]:
+def _normalize_event(event: Any) -> dict[str, Any] | None:
     """Normalize one bounded zone event without retaining opaque payload data."""
     source = _mapping(event)
     timestamp_fields = (
@@ -219,7 +219,20 @@ def _normalize_event(event: Any) -> dict[str, Any]:
         if fields:
             ambiguity["fields"] = fields
         result["timestamp_ambiguity"] = ambiguity
-    return {key: value for key, value in result.items() if value is not None}
+    normalized = {key: value for key, value in result.items() if value is not None}
+    if not any(
+        normalized.get(key) is not None
+        for key in (
+            "event_id",
+            "event_type",
+            "state",
+            "reason",
+            "occurred_at",
+            "source",
+        )
+    ) and raw_timestamp is None:
+        return None
+    return normalized
 
 
 def normalize_zone(zone: Any) -> dict[str, Any]:
@@ -295,7 +308,12 @@ def normalize_zone(zone: Any) -> dict[str, Any]:
         result["modeled_soil_moisture_units"] = "unknown"
 
     raw_events = _alias_value(source, ("latest_events", "events", "recent_events"))
-    events = [_normalize_event(item) for item in _list(raw_events) if isinstance(item, dict)]
+    events = [
+        normalized
+        for item in _list(raw_events)
+        if isinstance(item, dict)
+        and (normalized := _normalize_event(item)) is not None
+    ]
     if events:
         result["latest_events"] = events[:10]
     return {key: value for key, value in result.items() if value is not None}
@@ -344,10 +362,11 @@ def zone_entity_attributes(zone: Any) -> dict[str, Any]:
         and isinstance(source[key], (str, int, float, bool))
     }
     events = [
-        _normalize_event(item)
-        for item in _list(source.get("latest_events"))[:10]
+        normalized
+        for item in _list(source.get("latest_events"))
         if isinstance(item, dict)
-    ]
+        and (normalized := _normalize_event(item)) is not None
+    ][:10]
     if events:
         result["latest_events"] = events
     return result
