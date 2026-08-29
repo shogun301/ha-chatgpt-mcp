@@ -57,7 +57,9 @@ DOCUMENTATION_NETWORKS = tuple(
 )
 
 
-def candidate_paths() -> list[Path]:
+def candidate_paths(*, archive: bool = False) -> list[Path]:
+    if archive:
+        return [path for path in ROOT.rglob("*") if path.is_file()]
     output = subprocess.check_output(
         ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
         cwd=ROOT,
@@ -69,7 +71,7 @@ def audit_file(path: Path) -> list[str]:
     relative = path.relative_to(ROOT).as_posix()
     lowered = relative.casefold()
     findings: list[str] = []
-    if relative in {"scripts/public_release_audit.py", "uv.lock"}:
+    if relative == "scripts/public_release_audit.py":
         return findings
     if any(part in {"secrets", ".wrangler", "data", "logs", "backups"} for part in path.parts):
         findings.append(f"{relative}: forbidden generated or secret directory")
@@ -133,8 +135,17 @@ def audit_history() -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--history", action="store_true")
+    parser.add_argument(
+        "--archive",
+        action="store_true",
+        help="Audit every file in an exact git-archive export without a .git directory.",
+    )
     args = parser.parse_args()
-    findings = [item for path in candidate_paths() for item in audit_file(path)]
+    if args.archive and args.history:
+        parser.error("--archive and --history cannot be combined")
+    findings = [
+        item for path in candidate_paths(archive=args.archive) for item in audit_file(path)
+    ]
     if args.history:
         findings.extend(audit_history())
     if findings:

@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.6.3 - 2026-08-29
+
+- Builds and tests release images only from an exact Git archive of the public
+  candidate commit, with tracked Docker-input and manifest validation.
+- Runs the complete server, collector, and Home Assistant test suites inside the
+  exact image with networking disabled and a minimal sanitized environment.
+- Adds immutable source labels, pre-deployment startup smoke testing, and CI
+  parity for clean-context, packaging, schema, security, and runtime gates.
+
 ## 2.6.2 - 2026-08-29
 
 - Added a fail-closed automation exception for `button.press` that accepts only

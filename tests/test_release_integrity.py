@@ -1,0 +1,44 @@
+from __future__ import annotations
+
+import unittest
+import os
+from unittest.mock import patch
+
+from scripts import release_integrity
+
+
+class ReleaseIntegrityTests(unittest.TestCase):
+    def test_docker_sources_are_tracked_and_present(self) -> None:
+        sources = release_integrity.verify_docker_inputs(
+            archive=os.environ.get("RELEASE_ARCHIVE") == "1"
+        )
+        self.assertIn("uv.lock", sources)
+        self.assertIn("collector", sources)
+        self.assertIn("home_assistant", sources)
+        self.assertIn("scripts", sources)
+
+    def test_project_and_release_versions_match(self) -> None:
+        self.assertEqual(release_integrity.verify_versions(), "2.6.3")
+
+    def test_manifest_references_exist(self) -> None:
+        references = release_integrity.verify_manifests()
+        self.assertIn("pyproject.toml", references)
+        self.assertIn("uv.lock", references)
+
+    def test_release_automation_contains_all_clean_context_gates(self) -> None:
+        release_integrity.verify_release_automation()
+
+    def test_untracked_copied_directory_fails_closed(self) -> None:
+        if os.environ.get("RELEASE_ARCHIVE") == "1":
+            self.skipTest("git archive contains tracked files only")
+        tracked = release_integrity._tracked_files()
+        with patch.object(
+            release_integrity, "_tracked_files",
+            return_value={item for item in tracked if not item.startswith("app/")},
+        ):
+            with self.assertRaisesRegex(AssertionError, "not tracked"):
+                release_integrity.verify_docker_inputs(archive=False)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -9,7 +9,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$releaseVersion = '2.6.2'
+$releaseVersion = '2.6.3'
 $sourceRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $secretRoot = if ($SecretStagingPath) { [IO.Path]::GetFullPath($SecretStagingPath) } else { $null }
 $requiredSecrets = @(
@@ -38,9 +38,38 @@ if ($secretRoot) {
 }
 
 $awsExe = (Get-Command aws -ErrorAction Stop).Source
+$ghExe = (Get-Command gh -ErrorAction Stop).Source
+$gitExe = (Get-Command git -ErrorAction Stop).Source
 $sshExe = (Get-Command ssh -ErrorAction Stop).Source
 $scpExe = (Get-Command scp -ErrorAction Stop).Source
-$tarExe = (Get-Command tar -ErrorAction Stop).Source
+$uvExe = (Get-Command uv -ErrorAction Stop).Source
+$sourceStatus = (& $gitExe -C $sourceRoot status --porcelain=v1 --untracked-files=all) -join "`n"
+if ($LASTEXITCODE -ne 0 -or $sourceStatus) {
+    throw 'Deployment requires a clean Git checkout with no untracked files.'
+}
+$releaseCommit = ((& $gitExe -C $sourceRoot rev-parse HEAD) -join '').Trim()
+if ($LASTEXITCODE -ne 0 -or $releaseCommit -notmatch '^[0-9a-f]{40}$') {
+    throw 'Could not resolve the immutable release commit.'
+}
+& $uvExe run --project $sourceRoot --frozen python `
+    (Join-Path $sourceRoot 'scripts/release_integrity.py')
+if ($LASTEXITCODE -ne 0) { throw 'Release-integrity validation failed.' }
+& $uvExe run --project $sourceRoot --frozen python `
+    (Join-Path $sourceRoot 'scripts/public_release_audit.py') '--history'
+if ($LASTEXITCODE -ne 0) { throw 'Public-release audit failed.' }
+$publicRepository = 'shogun301/ha-chatgpt-mcp'
+$remoteMain = ((& $gitExe ls-remote "https://github.com/$publicRepository.git" refs/heads/main) -join '').Trim()
+if ($LASTEXITCODE -ne 0 -or -not $remoteMain.StartsWith("$releaseCommit`t")) {
+    throw 'The exact release commit is not the public GitHub main branch tip.'
+}
+$ciRuns = & $ghExe run list --repo $publicRepository --commit $releaseCommit `
+    --workflow public-safety.yml --limit 20 `
+    --json status,conclusion,headSha,headBranch,event | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or -not ($ciRuns | Where-Object {
+    $_.headSha -eq $releaseCommit -and $_.headBranch -eq 'main' -and $_.event -eq 'push' -and $_.status -eq 'completed' -and $_.conclusion -eq 'success'
+})) {
+    throw 'GitHub Public safety CI is not green on the exact release commit.'
+}
 $tempBase = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
 $tempDir = Join-Path $tempBase ("ha-mcp-deploy-" + [guid]::NewGuid().ToString('N'))
 $keyPath = Join-Path $tempDir 'lightsail'
@@ -61,8 +90,12 @@ set -Eeuo pipefail
 set +x
 umask 077
 
-release_version='2.6.2'
-archive_path='/tmp/ha-chatgpt-mcp-2.6.2.tar.gz'
+release_version='2.6.3'
+release_commit='__RELEASE_COMMIT__'
+archive_sha256='__ARCHIVE_SHA256__'
+archive_path='/tmp/ha-chatgpt-mcp-2.6.3.tar.gz'
+candidate_tag="ha-chatgpt-mcp:candidate-$release_commit"
+release_stage=$(mktemp -d /tmp/ha-mcp-release.XXXXXX)
 app_root='/opt/ha-chatgpt-mcp'
 collector_root='/opt/ha-host-diagnostics'
 collector_program="$collector_root/ha_host_diagnostics.py"
@@ -79,6 +112,8 @@ collector_existed=0
 unit_existed=0
 prior_image_id=''
 prior_image_ref=''
+tested_image_id=''
+smoke_container="ha-mcp-release-smoke-$stamp"
 prior_collector_enabled='disabled'
 prior_collector_active='inactive'
 homeassistant_started_before=''
@@ -112,6 +147,9 @@ record_marker() {
 }
 
 cleanup_staging() {
+  sudo docker rm -f "$smoke_container" >/dev/null 2>&1 || true
+  sudo docker image rm "$candidate_tag" >/dev/null 2>&1 || true
+  sudo rm -rf -- "$release_stage"
   sudo rm -f -- "$archive_path" "/tmp/ha-chatgpt-mcp-deploy-$release_version.sh"
   for secret_name in solaredge_client_id solaredge_client_secret solaredge_token_key solaredge_bridge_secret; do
     sudo rm -f -- "/tmp/$secret_name"
@@ -174,6 +212,57 @@ on_exit() {
 }
 trap on_exit EXIT
 
+stage='extracting_clean_release'
+printf '%s  %s\n' "$archive_sha256" "$archive_path" | sha256sum -c -
+sudo tar -xzf "$archive_path" -C "$release_stage"
+cd "$release_stage"
+stage='validating_release_integrity'
+sudo /usr/bin/python3 scripts/release_integrity.py --archive
+sudo /usr/bin/python3 scripts/public_release_audit.py --archive
+sudo /usr/bin/python3 -m unittest tests.test_deployment_security -v
+stage='building_mcp_image'
+sudo docker build --build-arg "VCS_REF=$release_commit" \
+  -t "$candidate_tag" .
+test "$(sudo docker image inspect -f '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+  "$candidate_tag")" = "$release_commit"
+tested_image_id=$(sudo docker image inspect -f '{{.Id}}' "$candidate_tag")
+stage='running_hermetic_release_tests'
+sudo docker run --rm --network none --env HOME=/tmp \
+  --env PYTHONDONTWRITEBYTECODE=1 --env RELEASE_ARCHIVE=1 \
+  --read-only --tmpfs /tmp --entrypoint python \
+  "$candidate_tag" \
+  -m pytest tests collector/tests home_assistant/tests
+stage='smoke_testing_release_image'
+sudo docker run -d --name "$smoke_container" --network none --read-only \
+  --tmpfs /tmp --tmpfs /data --entrypoint sh "$candidate_tag" -c '
+    set -eu
+    for name in ha_token oauth_hash jwt_secret origin_secret; do
+      printf sanitized-test-value > "/tmp/$name"
+    done
+    export PUBLIC_BASE_URL=https://example.invalid
+    export FRONTEND_PUBLIC_URL=https://frontend.example.invalid
+    export HA_BASE_URL=http://127.0.0.1:1
+    export HA_TOKEN_FILE=/tmp/ha_token
+    export OAUTH_PASSWORD_HASH_FILE=/tmp/oauth_hash
+    export JWT_SECRET_FILE=/tmp/jwt_secret
+    export ORIGIN_SHARED_SECRET_FILE=/tmp/origin_secret
+    export DATABASE_PATH=/data/mcp.sqlite
+    export AUDIT_LOG_PATH=/data/audit.jsonl
+    export HA_CONFIG_PATH=/data/automations.yaml
+    export BACKUP_PATH=/data/backups
+    exec uvicorn app.server:app --host 127.0.0.1 --port 8000 --no-proxy-headers
+  '
+for attempt in $(seq 1 20); do
+  if sudo docker exec "$smoke_container" python -c \
+    'import socket; socket.create_connection(("127.0.0.1", 8000), 1).close()'; then
+    break
+  fi
+  sleep 1
+done
+sudo docker exec "$smoke_container" python -c \
+  'import socket; socket.create_connection(("127.0.0.1", 8000), 1).close()'
+sudo docker rm -f "$smoke_container" >/dev/null
+
 sudo install -d -o root -g root -m 0700 "$backup_root"
 sudo tar -czf "$app_backup" \
   --exclude='./secrets' --exclude='./data' --exclude='./logs' --exclude='./backups' \
@@ -197,8 +286,12 @@ homeassistant_started_before=$(sudo docker container inspect -f '{{.State.Starte
 caddy_started_before=$(sudo docker container inspect -f '{{.State.StartedAt}}' caddy)
 
 mutated=1
+sudo docker image tag "$candidate_tag" "ha-chatgpt-mcp:$release_version"
 stage='installing_release_files'
-sudo tar -xzf "$archive_path" -C "$app_root"
+sudo find "$app_root" -mindepth 1 -maxdepth 1 \
+  ! -name .env ! -name secrets ! -name data ! -name logs ! -name backups \
+  -exec rm -rf -- {} +
+sudo tar -C "$release_stage" -cf - . | sudo tar -C "$app_root" -xf -
 if [ -s /tmp/solaredge_client_id ]; then
   for secret_name in solaredge_client_id solaredge_client_secret solaredge_token_key solaredge_bridge_secret; do
     sudo install -o 10001 -g 10001 -m 0400 "/tmp/$secret_name" "$app_root/secrets/$secret_name"
@@ -248,13 +341,11 @@ stage='validating_compose'
 sudo docker compose config --quiet
 stage='running_host_security_tests'
 sudo /usr/bin/python3 -m unittest tests.test_deployment_security -v
-stage='building_mcp_image'
-sudo docker build -t "ha-chatgpt-mcp:$release_version" .
-stage='running_release_tests'
-sudo docker run --rm --network none --entrypoint python \
-  "ha-chatgpt-mcp:$release_version" -m unittest discover -s tests -v
 stage='recreating_mcp_and_tunnel'
 sudo docker compose up -d --no-deps --force-recreate ha-chatgpt-mcp cloudflared
+test "$(sudo docker container inspect -f '{{.Image}}' ha-chatgpt-mcp)" = "$tested_image_id"
+test "$(sudo docker image inspect -f '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+  "$tested_image_id")" = "$release_commit"
 
 stage='waiting_for_mcp_health'
 for attempt in $(seq 1 30); do
@@ -270,7 +361,7 @@ with open('/tmp/ha-mcp-health.json', encoding='utf-8') as handle:
     payload = json.load(handle)
 assert payload.get('status') == 'ok'
 assert payload.get('home_assistant', {}).get('reachable') is True
-assert payload.get('service_version') == '2.6.2'
+assert payload.get('service_version') == '2.6.3'
 PY
 rm -f /tmp/ha-mcp-health.json
 curl --fail --silent --max-time 5 http://127.0.0.1:8123/ >/dev/null
@@ -361,19 +452,21 @@ $remoteScript = $remoteScript.Replace(
     '__PUBLIC_FRONTEND_URL__', $PublicFrontendUrl.TrimEnd('/')
 ).Replace(
     '__PUBLIC_MCP_URL__', $PublicMcpUrl.TrimEnd('/')
+).Replace(
+    '__RELEASE_COMMIT__', $releaseCommit
 )
 
 try {
     New-Item -ItemType Directory -Path $tempDir | Out-Null
-    & $tarExe '-czf' $archivePath `
-        '--exclude=.venv' '--exclude=.pytest_cache' '--exclude=.ruff_cache' `
-        '--exclude=__pycache__' '--exclude=*.pyc' `
-        '--exclude=secrets' '--exclude=data' '--exclude=logs' '--exclude=backups' `
-        '-C' $sourceRoot '.'
+    # git archive guarantees that ignored, untracked, and private helper files
+    # cannot enter the public release payload or its Docker build context.
+    & $gitExe -C $sourceRoot archive '--format=tar.gz' "--output=$archivePath" $releaseCommit
     if ($LASTEXITCODE -ne 0) { throw 'Could not build the deployment archive.' }
+    $archiveSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
+    $renderedRemoteScript = $remoteScript.Replace('__ARCHIVE_SHA256__', $archiveSha256)
     [IO.File]::WriteAllText(
         $remoteScriptPath,
-        (($remoteScript -replace "`r`n", "`n") + "`n"),
+        (($renderedRemoteScript -replace "`r`n", "`n") + "`n"),
         [Text.UTF8Encoding]::new($false)
     )
 

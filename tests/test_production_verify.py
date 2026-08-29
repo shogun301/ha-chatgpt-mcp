@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import json
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,6 +22,7 @@ for _name, _value in {
 os.environ.update(
     {
         "PUBLIC_BASE_URL": "https://example.invalid",
+        "FRONTEND_PUBLIC_URL": "https://frontend.example.invalid",
         "HA_BASE_URL": "http://127.0.0.1:8123",
         "HA_TOKEN_FILE": str(_root / "ha_token"),
         "OAUTH_PASSWORD_HASH_FILE": str(_root / "oauth_password_hash"),
@@ -36,8 +39,15 @@ for _directory in ("ha-config", "backups", "host-diagnostics"):
     (_root / _directory).mkdir()
 
 from app.lan import SERVICE_PORTS
+from app.server import ALLOWED_SERVICES, SERVER_VERSION, mcp
 from scripts.production_mcp_verify import (
+    DIAGNOSTIC_REQUESTS,
+    DIAGNOSTIC_TOOLS,
+    EXPECTED_TOOL_COUNT,
+    EXPECTED_VERSION,
     LAN_PROBE_SERVICES,
+    NEW_CAPABILITY_TOOLS,
+    SPRINKLER_SAFE_REQUESTS,
     _access_token,
     _transport_streams,
 )
@@ -84,3 +94,86 @@ class ProductionVerifierCompatibilityTests(unittest.TestCase):
 
     def test_verifier_uses_only_canonical_lan_services(self) -> None:
         self.assertTrue(set(LAN_PROBE_SERVICES).issubset(SERVICE_PORTS))
+
+
+class ProductionVerifierSchemaTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _assert_value_matches_schema(value: object, schema: dict[str, object]) -> None:
+        expected = schema.get("type")
+        if expected == "boolean":
+            assert isinstance(value, bool)
+        elif expected == "integer":
+            assert isinstance(value, int) and not isinstance(value, bool)
+        elif expected == "number":
+            assert isinstance(value, (int, float)) and not isinstance(value, bool)
+        elif expected == "string":
+            assert isinstance(value, str)
+        elif expected == "array":
+            assert isinstance(value, list)
+            item_schema = schema.get("items")
+            if isinstance(item_schema, dict):
+                for item in value:
+                    ProductionVerifierSchemaTests._assert_value_matches_schema(
+                        item, item_schema
+                    )
+        if "enum" in schema:
+            assert value in schema["enum"]
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if "minimum" in schema:
+                assert value >= schema["minimum"]
+            if "maximum" in schema:
+                assert value <= schema["maximum"]
+        if isinstance(value, str) and "pattern" in schema:
+            import re
+
+            assert re.fullmatch(str(schema["pattern"]), value)
+
+    async def test_all_production_verifier_requests_match_advertised_schemas(self) -> None:
+        tools = {tool.name: tool for tool in await mcp.list_tools()}
+        contract = json.loads(
+            Path("tests/fixtures/server-contract-2.6.3.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(EXPECTED_VERSION, SERVER_VERSION)
+        self.assertEqual(EXPECTED_TOOL_COUNT, len(tools))
+        self.assertEqual(contract["version"], SERVER_VERSION)
+        self.assertEqual(contract["tool_count"], len(tools))
+        self.assertEqual(set(contract["tool_names"]), set(tools))
+        canonical = lambda value: hashlib.sha256(
+            json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        self.assertEqual(
+            contract["tool_schema_sha256"],
+            canonical({name: tool.input_schema for name, tool in tools.items()}),
+        )
+        self.assertEqual(
+            contract["tool_annotations_sha256"],
+            canonical(
+                {
+                    name: (
+                        tool.annotations.model_dump(mode="json")
+                        if tool.annotations is not None
+                        else None
+                    )
+                    for name, tool in tools.items()
+                }
+            ),
+        )
+        self.assertEqual(
+            contract["generic_service_allowlist"],
+            {domain: sorted(services) for domain, services in ALLOWED_SERVICES.items()},
+        )
+        self.assertTrue(NEW_CAPABILITY_TOOLS.issubset(tools))
+        self.assertEqual(set(DIAGNOSTIC_TOOLS), set(DIAGNOSTIC_REQUESTS))
+        requests = {
+            "get_capability_sync_status": {"refresh": True},
+            **DIAGNOSTIC_REQUESTS,
+            **SPRINKLER_SAFE_REQUESTS,
+        }
+        for name, arguments in requests.items():
+            with self.subTest(tool=name):
+                schema = tools[name].input_schema
+                properties = schema.get("properties", {})
+                self.assertTrue(set(arguments).issubset(properties))
+                self.assertTrue(set(schema.get("required", [])).issubset(arguments))
+                for key, value in arguments.items():
+                    self._assert_value_matches_schema(value, properties[key])

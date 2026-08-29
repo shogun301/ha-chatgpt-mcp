@@ -42,7 +42,7 @@ unrestricted service proxy.
 - **OAuth-native remote access:** authorization code flow with S256 PKCE,
   dynamic client registration, scoped access tokens, and MCP resource metadata.
 
-Version **2.6.2** currently advertises **99 tools**. See
+Version **2.6.3** currently advertises **99 tools**. See
 [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## Architecture
@@ -118,6 +118,7 @@ uv sync --frozen
 The test suite and public-source audit do not need production credentials:
 
 ```bash
+uv run python scripts/release_integrity.py
 uv run python scripts/public_release_audit.py --history
 uv run --with pytest python -m pytest tests collector/tests home_assistant/tests
 ```
@@ -295,14 +296,17 @@ read [SECURITY.md](SECURITY.md).
 The PowerShell deployment script in
 [`scripts/deploy-production.ps1`](scripts/deploy-production.ps1) is an
 opinionated AWS Lightsail reference. It requires explicit AWS profile, region,
-instance, frontend URL, and MCP URL parameters; packages the reviewed source;
-creates backups; deploys the collector and container; runs verification; and
-supports rollback. Review it carefully before adapting it to another host.
+instance, frontend URL, and MCP URL parameters; requires a clean Git tree;
+packages the exact reviewed commit with `git archive`; builds, hermetically
+tests, and smoke-tests the immutable image; creates backups; deploys the
+collector and container; verifies source identity; and supports rollback.
+Review it carefully before adapting it to another host.
 
 Before every public push or production release:
 
 ```bash
 uv sync --frozen
+uv run python scripts/release_integrity.py
 uv run python scripts/public_release_audit.py --history
 uv run --with pytest python -m pytest tests collector/tests home_assistant/tests
 ```

@@ -59,21 +59,23 @@ completeness instead of being silently treated as healthy.
 
 ## Install or upgrade
 
-Use the established production deployment script, which packages the collector
-with the application, creates timestamped backups, runs the full test suite in
-an isolated container, installs/enables the included systemd unit, deploys MCP
-2.6.2, and performs read-only health checks. Do not hand-copy secrets or add a
-Docker-socket mount.
+Use the established production deployment script, which requires a clean Git
+checkout, exports the exact commit with `git archive`, validates every tracked
+build input, builds and smoke-tests the immutable image, runs the full suite
+with networking disabled, creates timestamped backups, installs/enables the
+included systemd unit, deploys MCP 2.6.3, and performs read-only health checks.
+Do not hand-copy secrets or add a Docker-socket mount.
 
 Before deployment:
 
-1. Confirm the release version is 2.6.2 and the expected tool count is 99.
+1. Confirm the release version is 2.6.3 and the expected tool count is 99.
 2. Review the complete diff, especially OAuth scope defaults, fixed probe
    targets, collector command constants, Compose mounts, and systemd hardening.
 3. Confirm backups exclude credentials and include the previous application,
    Compose definition, collector code/unit, and rollback image reference.
-4. Run all unit, integration, schema, authorization, bounds, redaction,
-   persistence, and deployment-security tests.
+4. Require the public audit, manifest-integrity check, all unit/integration/
+   schema/security tests, exact-image hermetic suite, package build, startup
+   smoke test, and GitHub CI to pass on the exact candidate commit.
 
 During deployment, record `started` and `completed` markers with the collector's
 fixed `mark-deployment` operation. Marker inputs accept only a semantic version
@@ -100,7 +102,7 @@ failure:
    the pre-deployment baseline. There must be no new public listener, firewall
    or security-group opening, public route, or broadened tunnel permission.
    Confirm Cloudflare metrics port 49312 remains loopback-only.
-4. **MCP registry:** authenticated discovery reports version 2.6.2 and exactly
+4. **MCP registry:** authenticated discovery reports version 2.6.3 and exactly
    99 tools, preserving the prior 89 names and adding capability sync,
    sprinkler, calendar, schedule, and time tools.
 5. **Authorization:** unauthenticated and invalid-token requests are rejected.
@@ -117,7 +119,7 @@ failure:
    issue a service call or change any device state.
 8. **Capability persistence:** call `get_capability_sync_status` with refresh,
    require `in_sync`, verify a 300-second interval and a persisted baseline for
-   version 2.6.2, then confirm the file remains under `/data` across MCP restart.
+    version 2.6.3, then confirm the file remains under `/data` across MCP restart.
 9. **Persistence:** restart only the collector in a controlled maintenance
    check if necessary. Confirm prior ledgers remain readable and the next sample
    appends normally. Do not restart Home Assistant to test persistence.

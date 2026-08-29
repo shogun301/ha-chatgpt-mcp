@@ -19,5 +19,71 @@ jobs:
         with:
           python-version: "3.12"
       - run: uv sync --frozen
+      - run: uv run python scripts/release_integrity.py
       - run: uv run python scripts/public_release_audit.py --history
-      - run: uv run --with pytest python -m pytest tests collector/tests
+      - run: uv run --with pytest python -m pytest tests collector/tests home_assistant/tests
+      - name: Export the exact public candidate
+        run: |
+          set -Eeuo pipefail
+          release_dir="$(mktemp -d)"
+          git archive HEAD | tar -x -C "$release_dir"
+          printf '%s\n' "$release_dir" > "$RUNNER_TEMP/ha-mcp-release-dir"
+          (
+            cd "$release_dir"
+            python scripts/release_integrity.py --archive
+            python scripts/public_release_audit.py --archive
+          )
+      - name: Build the exact candidate image
+        run: |
+          set -Eeuo pipefail
+          release_dir="$(cat "$RUNNER_TEMP/ha-mcp-release-dir")"
+          docker build --build-arg "VCS_REF=$GITHUB_SHA" \
+            --tag "ha-chatgpt-mcp:$GITHUB_SHA" "$release_dir"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "ha-chatgpt-mcp:$GITHUB_SHA")" = "$GITHUB_SHA"
+      - name: Run the full suite in the exact image without networking
+        run: |
+          set -Eeuo pipefail
+          image="ha-chatgpt-mcp:$GITHUB_SHA"
+          docker run --rm --network none --env HOME=/tmp \
+            --env PYTHONDONTWRITEBYTECODE=1 --env RELEASE_ARCHIVE=1 \
+            --read-only --tmpfs /tmp --entrypoint python "$image" \
+            -m pytest tests collector/tests home_assistant/tests
+      - name: Smoke-test exact image startup with a minimal sanitized environment
+        run: |
+          set -Eeuo pipefail
+          image="ha-chatgpt-mcp:$GITHUB_SHA"
+          cleanup() { docker rm -f ha-mcp-release-smoke >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          docker run --detach --name ha-mcp-release-smoke \
+            --network none --read-only --tmpfs /tmp --tmpfs /data \
+            --entrypoint sh "$image" -c '
+              set -eu
+              for name in ha_token oauth_hash jwt_secret origin_secret; do
+                printf sanitized-test-value > "/tmp/$name"
+              done
+              export PUBLIC_BASE_URL=https://example.invalid
+              export FRONTEND_PUBLIC_URL=https://frontend.example.invalid
+              export HA_BASE_URL=http://127.0.0.1:1
+              export HA_TOKEN_FILE=/tmp/ha_token
+              export OAUTH_PASSWORD_HASH_FILE=/tmp/oauth_hash
+              export JWT_SECRET_FILE=/tmp/jwt_secret
+              export ORIGIN_SHARED_SECRET_FILE=/tmp/origin_secret
+              export DATABASE_PATH=/data/mcp.sqlite
+              export AUDIT_LOG_PATH=/data/audit.jsonl
+              export HA_CONFIG_PATH=/data/automations.yaml
+              export BACKUP_PATH=/data/backups
+              exec uvicorn app.server:app --host 127.0.0.1 --port 8000 --no-proxy-headers
+            '
+          for attempt in $(seq 1 20); do
+            if docker exec ha-mcp-release-smoke python -c 'import socket; socket.create_connection(("127.0.0.1", 8000), 1).close()'; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs ha-mcp-release-smoke
+          exit 1
+      - name: Build the Python package from the exact public candidate
+        run: |
+          set -Eeuo pipefail
+          release_dir="$(cat "$RUNNER_TEMP/ha-mcp-release-dir")"
+          (cd "$release_dir" && uv build --out-dir "$RUNNER_TEMP/dist")

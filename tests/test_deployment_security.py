@@ -377,16 +377,16 @@ class DeploymentScriptSecurityTests(unittest.TestCase):
             if re.match(r"^\s*(?:sudo\s+)?install\b", line):
                 cls.install_commands.append(shlex.split(line.strip(), posix=True))
 
-    def test_release_is_pinned_to_2_6_2(self) -> None:
+    def test_release_is_pinned_to_2_6_3(self) -> None:
         self.assertRegex(
             self.text,
-            r"(?m)^\s*\$releaseVersion\s*=\s*['\"]2\.6\.2['\"]\s*$",
+            r"(?m)^\s*\$releaseVersion\s*=\s*['\"]2\.6\.3['\"]\s*$",
         )
-        self.assertRegex(self.text, r"(?m)^\s*release_version=['\"]2\.6\.2['\"]\s*$")
+        self.assertRegex(self.text, r"(?m)^\s*release_version=['\"]2\.6\.3['\"]\s*$")
 
     def test_tests_run_before_main_container_recreation(self) -> None:
         main = self.text[
-            self.text.index("mutated=1") : self.text.index("record_marker completed")
+            self.text.index("stage='extracting_clean_release'") : self.text.index("record_marker completed")
         ]
         test = re.search(
             r"docker\s+run\b[^\r\n]*--network\s+none\b[\s\S]*?(?:unittest|pytest)",
@@ -419,14 +419,38 @@ class DeploymentScriptSecurityTests(unittest.TestCase):
         self.assertIn("dt.date.fromisoformat(path.stem[-10:])", self.text)
         self.assertNotIn("path.stem.rsplit('-', 1)[-1]", self.text)
 
-    def test_host_security_tests_run_on_release_tree_not_runtime_image(self) -> None:
+    def test_host_and_exact_image_security_tests_cover_the_release_tree(self) -> None:
         dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
-        self.assertIn("tests/test_deployment_security.py", dockerignore)
+        self.assertNotIn("tests/test_deployment_security.py", dockerignore)
         host_test_at = self.text.index(
             "sudo /usr/bin/python3 -m unittest tests.test_deployment_security -v"
         )
-        build_at = self.text.index('sudo docker build -t "ha-chatgpt-mcp:$release_version" .')
+        build_at = self.text.index("sudo docker build --build-arg")
         self.assertLess(host_test_at, build_at)
+        for suite in ("tests", "collector/tests", "home_assistant/tests"):
+            self.assertIn(suite, self.text)
+
+    def test_release_uses_clean_git_archive_and_immutable_image_identity(self) -> None:
+        self.assertIn("status --porcelain=v1 --untracked-files=all", self.text)
+        self.assertIn("git archive", self.text)
+        self.assertNotIn("'-C' $sourceRoot '.'", self.text)
+        self.assertIn("release_commit='__RELEASE_COMMIT__'", self.text)
+        self.assertIn("archive_sha256='__ARCHIVE_SHA256__'", self.text)
+        self.assertIn("sha256sum -c -", self.text)
+        self.assertIn("candidate_tag=", self.text)
+        self.assertIn("org.opencontainers.image.revision", self.text)
+        self.assertIn("tested_image_id=$(sudo docker image inspect", self.text)
+        self.assertIn("docker container inspect -f '{{.Image}}' ha-chatgpt-mcp", self.text)
+
+    def test_release_requires_public_tip_and_green_exact_commit_ci(self) -> None:
+        self.assertIn("ls-remote", self.text)
+        self.assertIn("refs/heads/main", self.text)
+        self.assertIn("ghExe run list", self.text)
+        self.assertIn("--workflow public-safety.yml", self.text)
+        self.assertIn("$_.headSha -eq $releaseCommit", self.text)
+        self.assertIn("$_.headBranch -eq 'main'", self.text)
+        self.assertIn("$_.event -eq 'push'", self.text)
+        self.assertIn("$_.conclusion -eq 'success'", self.text)
 
     def test_collector_installation_uses_fixed_root_ownership(self) -> None:
         def installed(

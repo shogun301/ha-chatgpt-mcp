@@ -33,7 +33,7 @@ DIAGNOSTIC_TOOLS = (
     "probe_lan_node",
 )
 LAN_PROBE_SERVICES = ("dns", "router_ssh")
-EXPECTED_VERSION = "2.6.2"
+EXPECTED_VERSION = "2.6.3"
 EXPECTED_TOOL_COUNT = 99
 NEW_CAPABILITY_TOOLS = {
     "get_capability_sync_status",
@@ -46,6 +46,27 @@ NEW_CAPABILITY_TOOLS = {
     "get_sprinkler_history",
     "refresh_sprinkler",
     "run_sprinkler_sequence",
+}
+DIAGNOSTIC_REQUESTS: dict[str, dict[str, Any]] = {
+    "get_host_runtime_health": {},
+    "get_restart_outage_diagnostics": {"since_hours": 24, "limit": 50},
+    "list_diagnostic_events": {"since_hours": 24, "limit": 50},
+    "get_fixed_route_health": {},
+    "get_lan_gateway_status": {},
+    "list_lan_nodes": {
+        "services": ["dns", "https", "ipp"],
+        "max_results": 20,
+    },
+    "probe_lan_node": {
+        "node_id": "node-001",
+        "services": list(LAN_PROBE_SERVICES),
+    },
+}
+SPRINKLER_SAFE_REQUESTS: dict[str, dict[str, Any]] = {
+    "list_sprinkler_zones": {},
+    "get_sprinkler_configuration": {},
+    "get_sprinkler_summary": {},
+    "refresh_sprinkler": {},
 }
 
 _TOKEN_RE = re.compile(
@@ -164,21 +185,7 @@ async def _session(scope: str, *, diagnostics_allowed: bool) -> dict[str, Any]:
 
                 results: dict[str, bool] = {}
                 for name in DIAGNOSTIC_TOOLS:
-                    arguments: dict[str, Any] = {}
-                    if name == "get_restart_outage_diagnostics":
-                        arguments = {"since_hours": 24, "limit": 50}
-                    elif name == "list_diagnostic_events":
-                        arguments = {"since_hours": 24, "limit": 50}
-                    elif name == "list_lan_nodes":
-                        arguments = {
-                            "services": ["dns", "https", "ipp"],
-                            "max_results": 20,
-                        }
-                    elif name == "probe_lan_node":
-                        arguments = {
-                            "node_id": "node-001",
-                            "services": list(LAN_PROBE_SERVICES),
-                        }
+                    arguments = DIAGNOSTIC_REQUESTS[name]
                     result = await session.call_tool(name, arguments)
                     is_error = bool(getattr(result, "is_error", False))
                     if diagnostics_allowed and is_error:
@@ -193,13 +200,8 @@ async def _session(scope: str, *, diagnostics_allowed: bool) -> dict[str, Any]:
 
                 sprinkler_safe_calls: dict[str, bool] = {}
                 if "mcp:write" in scope.split():
-                    for name in (
-                        "list_sprinkler_zones",
-                        "get_sprinkler_configuration",
-                        "get_sprinkler_summary",
-                        "refresh_sprinkler",
-                    ):
-                        result = await session.call_tool(name, {})
+                    for name, arguments in SPRINKLER_SAFE_REQUESTS.items():
+                        result = await session.call_tool(name, arguments)
                         is_error = bool(getattr(result, "is_error", False))
                         if is_error:
                             raise AssertionError(f"{name} failed safe production acceptance")
