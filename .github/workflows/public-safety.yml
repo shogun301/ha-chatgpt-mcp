@@ -18,10 +18,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: uv sync --frozen
-      - run: uv run python scripts/release_integrity.py
-      - run: uv run python scripts/public_release_audit.py --history
-      - run: uv run --with pytest python -m pytest tests collector/tests home_assistant/tests
+      - run: python scripts/release_integrity.py
+      - run: python scripts/public_release_audit.py --history
       - name: Export the exact public candidate
         run: |
           set -Eeuo pipefail
@@ -34,6 +32,8 @@ jobs:
             python scripts/public_release_audit.py --archive
           )
           chmod -R a+rX "$release_dir"
+      - run: uv sync --frozen
+      - run: uv run --with pytest python -m pytest tests collector/tests home_assistant/tests
       - name: Build the exact candidate image
         run: |
           set -Eeuo pipefail

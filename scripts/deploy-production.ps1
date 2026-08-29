@@ -51,12 +51,16 @@ $releaseCommit = ((& $gitExe -C $sourceRoot rev-parse HEAD) -join '').Trim()
 if ($LASTEXITCODE -ne 0 -or $releaseCommit -notmatch '^[0-9a-f]{40}$') {
     throw 'Could not resolve the immutable release commit.'
 }
-& $uvExe run --project $sourceRoot --frozen python `
+& $uvExe run '--no-project' '--python' '3.12' 'python' `
     (Join-Path $sourceRoot 'scripts/release_integrity.py')
 if ($LASTEXITCODE -ne 0) { throw 'Release-integrity validation failed.' }
-& $uvExe run --project $sourceRoot --frozen python `
+& $uvExe run '--no-project' '--python' '3.12' 'python' `
     (Join-Path $sourceRoot 'scripts/public_release_audit.py') '--history'
 if ($LASTEXITCODE -ne 0) { throw 'Public-release audit failed.' }
+$sourceStatus = (& $gitExe -C $sourceRoot status --porcelain=v1 --untracked-files=all) -join "`n"
+if ($LASTEXITCODE -ne 0 -or $sourceStatus) {
+    throw 'Release validation modified the clean source checkout.'
+}
 $publicRepository = 'shogun301/ha-chatgpt-mcp'
 $remoteMain = ((& $gitExe ls-remote "https://github.com/$publicRepository.git" refs/heads/main) -join '').Trim()
 if ($LASTEXITCODE -ne 0 -or -not $remoteMain.StartsWith("$releaseCommit`t")) {

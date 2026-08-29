@@ -190,6 +190,13 @@ def verify_release_automation() -> None:
     ):
         if literal not in deploy:
             raise AssertionError(f"deployment is missing release gate: {literal}")
+    sync_at = workflow.index("uv sync --frozen")
+    if workflow.index("python scripts/release_integrity.py") > sync_at:
+        raise AssertionError("CI must validate the clean checkout before dependency setup")
+    if workflow.index("git archive HEAD") > sync_at:
+        raise AssertionError("CI must export the exact candidate before dependency setup")
+    if "'--no-project'" not in deploy:
+        raise AssertionError("deployment validators must not install or build the release project")
 
 
 def main() -> int:

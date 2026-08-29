@@ -444,6 +444,10 @@ class DeploymentScriptSecurityTests(unittest.TestCase):
 
     def test_release_uses_clean_git_archive_and_immutable_image_identity(self) -> None:
         self.assertIn("status --porcelain=v1 --untracked-files=all", self.text)
+        self.assertGreaterEqual(
+            self.text.count("status --porcelain=v1 --untracked-files=all"), 2
+        )
+        self.assertIn("'--no-project'", self.text)
         self.assertIn("git archive", self.text)
         self.assertNotIn("'-C' $sourceRoot '.'", self.text)
         self.assertIn("release_commit='__RELEASE_COMMIT__'", self.text)
