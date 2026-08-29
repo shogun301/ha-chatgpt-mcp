@@ -435,6 +435,16 @@ class DeploymentScriptSecurityTests(unittest.TestCase):
         archive = self.text.index("$tempBase =")
         self.assertLess(public_gate, archive)
 
+    def test_reused_overlay_requires_exact_candidate_identity(self) -> None:
+        self.assertIn("[switch]$ReuseVerifiedWyzeOverlay", self.text)
+        block = self.text[
+            self.text.index("if [ \"$reuse_verified_overlay\" = 1 ]") :
+            self.text.index("homeassistant_started_before=", self.text.index("if [ \"$reuse_verified_overlay\" = 1 ]"))
+        ]
+        self.assertIn("cmp --silent", block)
+        self.assertIn("candidate_overlay=", block)
+        self.assertNotIn("docker restart homeassistant", block)
+
     def test_protected_ha_route_accepts_only_expected_access_responses(self) -> None:
         self.assertIn("ha_public_status=$(curl", self.text)
         self.assertIn("200|302|403", self.text)

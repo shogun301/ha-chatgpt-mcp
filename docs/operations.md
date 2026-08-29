@@ -78,6 +78,9 @@ Before deployment:
    loopback-only candidate, runs the hermetic suite and every live sprinkler
    read acceptance call, invokes no command tool, removes the candidate, and
    exits without replacing a service. A failed preflight is a hard stop.
+   When that exact overlay is already live, pass `-ReuseVerifiedWyzeOverlay`;
+   deployment then requires byte-for-byte identity for every overlay file and
+   leaves Home Assistant running without a restart.
 3. Review the complete diff, especially OAuth scope defaults, fixed probe
    targets, collector command constants, Compose mounts, and systemd hardening.
 4. Confirm backups exclude credentials and include the previous application,

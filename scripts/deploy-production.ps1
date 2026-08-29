@@ -5,7 +5,8 @@ param(
     [Parameter(Mandatory)][string]$InstanceName,
     [Parameter(Mandatory)][ValidatePattern('^https://')][string]$PublicFrontendUrl,
     [Parameter(Mandatory)][ValidatePattern('^https://')][string]$PublicMcpUrl,
-    [switch]$PreflightOnly
+    [switch]$PreflightOnly,
+    [switch]$ReuseVerifiedWyzeOverlay
 )
 
 $ErrorActionPreference = 'Stop'
@@ -107,6 +108,7 @@ umask 077
 release_version='2.7.3'
 release_commit='__RELEASE_COMMIT__'
 preflight_only='__PREFLIGHT_ONLY__'
+reuse_verified_overlay='__REUSE_VERIFIED_OVERLAY__'
 archive_sha256='__ARCHIVE_SHA256__'
 archive_path='/tmp/ha-chatgpt-mcp-2.7.3.tar.gz'
 candidate_tag="ha-chatgpt-mcp:candidate-$release_commit"
@@ -671,15 +673,26 @@ PY
 capture_loaded_entries_main "$overlay_baseline/loaded-before.json"
 capture_overlay_runtime_main "$overlay_baseline/runtime-before.json"
 stage='deploying_wyze_overlay'
-sudo install -d -o root -g root -m 0700 "$(dirname "$overlay_backup")"
-sudo test ! -e "$overlay_backup"
-sudo tar -czf "$overlay_backup" -C /opt/homeassistant/config/custom_components wyzeapi
-overlay_mutated=1
-bash "/tmp/__OVERLAY_SCRIPT_NAME__" "$overlay_backup"
-sudo test -f "$overlay_backup"
-if [ "${HA_MCP_FAIL_AFTER_OVERLAY_SUCCESS:-0}" = 1 ]; then
-  stage='injected_failure_after_overlay_success'
-  false
+if [ "$reuse_verified_overlay" = 1 ]; then
+  stage='verifying_reused_wyze_overlay'
+  candidate_overlay="$release_stage/home_assistant/wyzeapi_overlay/custom_components/wyzeapi"
+  for name in manifest.json __init__.py const.py irrigation.py irrigation_data.py sensor.py services.yaml; do
+    sudo test -f "$candidate_overlay/$name"
+    sudo cmp --silent "$candidate_overlay/$name" "$overlay_target/$name"
+  done
+  sudo python3 -c 'import json,sys; assert json.load(open(sys.argv[1], encoding="utf-8")).get("version") == "0.1.40"' \
+    "$overlay_target/manifest.json"
+else
+  sudo install -d -o root -g root -m 0700 "$(dirname "$overlay_backup")"
+  sudo test ! -e "$overlay_backup"
+  sudo tar -czf "$overlay_backup" -C /opt/homeassistant/config/custom_components wyzeapi
+  overlay_mutated=1
+  bash "/tmp/__OVERLAY_SCRIPT_NAME__" "$overlay_backup"
+  sudo test -f "$overlay_backup"
+  if [ "${HA_MCP_FAIL_AFTER_OVERLAY_SUCCESS:-0}" = 1 ]; then
+    stage='injected_failure_after_overlay_success'
+    false
+  fi
 fi
 homeassistant_started_before=$(sudo docker container inspect -f '{{.State.StartedAt}}' homeassistant)
 stage='recreating_mcp'
@@ -843,8 +856,11 @@ try {
         [Text.UTF8Encoding]::new($false)
     )
     $preflightFlag = if ($PreflightOnly) { '1' } else { '0' }
+    $reuseOverlayFlag = if ($ReuseVerifiedWyzeOverlay) { '1' } else { '0' }
     $renderedRemoteScript = $remoteScript.Replace('__ARCHIVE_SHA256__', $archiveSha256).Replace(
         '__PREFLIGHT_ONLY__', $preflightFlag
+    ).Replace(
+        '__REUSE_VERIFIED_OVERLAY__', $reuseOverlayFlag
     )
     [IO.File]::WriteAllText(
         $remoteScriptPath,
