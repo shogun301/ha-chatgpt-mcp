@@ -160,13 +160,14 @@ def verify_release_automation() -> None:
     for literal in (
         "git archive HEAD", "docker build", "--network none", "collector/tests",
         "home_assistant/tests", "release_integrity.py --archive",
-        "org.opencontainers.image.revision",
+        "org.opencontainers.image.revision", 'chmod -R a+rX "$release_dir"',
     ):
         if literal not in workflow:
             raise AssertionError(f"CI is missing release gate: {literal}")
     for literal in (
         "git archive", "release_commit", "--network none", "collector/tests",
         "home_assistant/tests", "org.opencontainers.image.revision", "release_stage",
+        'chmod -R a+rX "$release_stage"',
     ):
         if literal not in deploy:
             raise AssertionError(f"deployment is missing release gate: {literal}")

@@ -220,6 +220,7 @@ stage='validating_release_integrity'
 sudo /usr/bin/python3 scripts/release_integrity.py --archive
 sudo /usr/bin/python3 scripts/public_release_audit.py --archive
 sudo /usr/bin/python3 -m unittest tests.test_deployment_security -v
+sudo chmod -R a+rX "$release_stage"
 stage='building_mcp_image'
 sudo docker build --build-arg "VCS_REF=$release_commit" \
   -t "$candidate_tag" .

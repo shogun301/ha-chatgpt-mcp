@@ -33,6 +33,7 @@ jobs:
             python scripts/release_integrity.py --archive
             python scripts/public_release_audit.py --archive
           )
+          chmod -R a+rX "$release_dir"
       - name: Build the exact candidate image
         run: |
           set -Eeuo pipefail

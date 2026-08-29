@@ -410,6 +410,14 @@ class DeploymentScriptSecurityTests(unittest.TestCase):
         )
         self.assertIn('--volume "$release_root:/release:ro"', test.group(0))
         self.assertRegex(test.group(0), r"--workdir\s+/release\b")
+        readable = re.search(
+            r"chmod\s+-R\s+a\+rX\s+[\"']?\$release_stage[\"']?",
+            main,
+        )
+        self.assertIsNotNone(
+            readable, "the non-root image user must be able to traverse the release archive"
+        )
+        self.assertLess(readable.start(), test.start())
         self.assertNotRegex(test.group(0), r"docker\s+compose\s+run\b")
         self.assertRegex(recreate.group(0), r"\bha-chatgpt-mcp\b")
         self.assertNotRegex(recreate.group(0), r"(?:^|\s)homeassistant(?:\s|$)")
