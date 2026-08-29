@@ -384,12 +384,12 @@ class DeploymentScriptSecurityTests(unittest.TestCase):
             if re.match(r"^\s*(?:sudo\s+)?install\b", line):
                 cls.install_commands.append(shlex.split(line.strip(), posix=True))
 
-    def test_release_is_pinned_to_2_7_2(self) -> None:
+    def test_release_is_pinned_to_2_7_3(self) -> None:
         self.assertRegex(
             self.text,
-            r"(?m)^\s*\$releaseVersion\s*=\s*['\"]2\.7\.2['\"]\s*$",
+            r"(?m)^\s*\$releaseVersion\s*=\s*['\"]2\.7\.3['\"]\s*$",
         )
-        self.assertRegex(self.text, r"(?m)^\s*release_version=['\"]2\.7\.2['\"]\s*$")
+        self.assertRegex(self.text, r"(?m)^\s*release_version=['\"]2\.7\.3['\"]\s*$")
 
     def test_tests_run_before_main_container_recreation(self) -> None:
         main = self.text[
@@ -420,6 +420,20 @@ class DeploymentScriptSecurityTests(unittest.TestCase):
         self.assertNotRegex(test.group(0), r"docker\s+compose\s+run\b")
         self.assertRegex(recreate.group(0), r"\bha-chatgpt-mcp\b")
         self.assertNotRegex(recreate.group(0), r"(?:^|\s)homeassistant(?:\s|$)")
+
+    def test_live_read_only_preflight_precedes_every_release_mutation(self) -> None:
+        preflight = self.text.index("stage='running_live_read_only_preflight'")
+        mutation = self.text.index("mutated=1")
+        self.assertLess(preflight, mutation)
+        predeployment = self.text[preflight:mutation]
+        self.assertIn("python -m scripts.production_mcp_verify", predeployment)
+        self.assertIn('if [ "$preflight_only" = 1 ]', predeployment)
+
+    def test_preflight_only_does_not_require_publication(self) -> None:
+        self.assertIn("[switch]$PreflightOnly", self.text)
+        public_gate = self.text.index("if (-not $PreflightOnly)")
+        archive = self.text.index("$tempBase =")
+        self.assertLess(public_gate, archive)
 
     def test_protected_ha_route_accepts_only_expected_access_responses(self) -> None:
         self.assertIn("ha_public_status=$(curl", self.text)

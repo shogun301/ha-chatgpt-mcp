@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.7.3 - 2026-08-29
+
+- Permit Wyze native 12-digit device/zone identifiers in sprinkler acceptance while continuing to reject contextual AWS account IDs, credentials, IPs, and home paths.
+- Include the exact tool name in production verifier sanitization failures so rollback evidence is actionable.
+- Add a live, read-only candidate sidecar preflight that must pass before any MCP release mutation; `-PreflightOnly` runs it without requiring GitHub publication or deploying a service.
+
 ## 2.7.2 - 2026-08-29
 
 - Treat upstream history source sentinels such as `unknown`, `unavailable`, and

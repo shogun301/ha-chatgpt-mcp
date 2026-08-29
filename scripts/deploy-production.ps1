@@ -4,12 +4,13 @@ param(
     [Parameter(Mandatory)][string]$AwsRegion,
     [Parameter(Mandatory)][string]$InstanceName,
     [Parameter(Mandatory)][ValidatePattern('^https://')][string]$PublicFrontendUrl,
-    [Parameter(Mandatory)][ValidatePattern('^https://')][string]$PublicMcpUrl
+    [Parameter(Mandatory)][ValidatePattern('^https://')][string]$PublicMcpUrl,
+    [switch]$PreflightOnly
 )
 
 $ErrorActionPreference = 'Stop'
 
-$releaseVersion = '2.7.2'
+$releaseVersion = '2.7.3'
 $sourceRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $secretRoot = if ($SecretStagingPath) { [IO.Path]::GetFullPath($SecretStagingPath) } else { $null }
 $requiredSecrets = @(
@@ -63,18 +64,20 @@ $sourceStatus = (& $gitExe -C $sourceRoot status --porcelain=v1 --untracked-file
 if ($LASTEXITCODE -ne 0 -or $sourceStatus) {
     throw 'Release validation modified the clean source checkout.'
 }
-$publicRepository = 'shogun301/ha-chatgpt-mcp'
-$remoteMain = ((& $gitExe ls-remote "https://github.com/$publicRepository.git" refs/heads/main) -join '').Trim()
-if ($LASTEXITCODE -ne 0 -or -not $remoteMain.StartsWith("$releaseCommit`t")) {
-    throw 'The exact release commit is not the public GitHub main branch tip.'
-}
-$ciRuns = & $ghExe run list --repo $publicRepository --commit $releaseCommit `
-    --workflow public-safety.yml --limit 20 `
-    --json status,conclusion,headSha,headBranch,event | ConvertFrom-Json
-if ($LASTEXITCODE -ne 0 -or -not ($ciRuns | Where-Object {
-    $_.headSha -eq $releaseCommit -and $_.headBranch -eq 'main' -and $_.event -eq 'push' -and $_.status -eq 'completed' -and $_.conclusion -eq 'success'
-})) {
-    throw 'GitHub Public safety CI is not green on the exact release commit.'
+if (-not $PreflightOnly) {
+    $publicRepository = 'shogun301/ha-chatgpt-mcp'
+    $remoteMain = ((& $gitExe ls-remote "https://github.com/$publicRepository.git" refs/heads/main) -join '').Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $remoteMain.StartsWith("$releaseCommit`t")) {
+        throw 'The exact release commit is not the public GitHub main branch tip.'
+    }
+    $ciRuns = & $ghExe run list --repo $publicRepository --commit $releaseCommit `
+        --workflow public-safety.yml --limit 20 `
+        --json status,conclusion,headSha,headBranch,event | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0 -or -not ($ciRuns | Where-Object {
+        $_.headSha -eq $releaseCommit -and $_.headBranch -eq 'main' -and $_.event -eq 'push' -and $_.status -eq 'completed' -and $_.conclusion -eq 'success'
+    })) {
+        throw 'GitHub Public safety CI is not green on the exact release commit.'
+    }
 }
 
 $tempBase = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
@@ -101,10 +104,11 @@ set -Eeuo pipefail
 set +x
 umask 077
 
-release_version='2.7.2'
+release_version='2.7.3'
 release_commit='__RELEASE_COMMIT__'
+preflight_only='__PREFLIGHT_ONLY__'
 archive_sha256='__ARCHIVE_SHA256__'
-archive_path='/tmp/ha-chatgpt-mcp-2.7.2.tar.gz'
+archive_path='/tmp/ha-chatgpt-mcp-2.7.3.tar.gz'
 candidate_tag="ha-chatgpt-mcp:candidate-$release_commit"
 release_stage=$(mktemp -d /tmp/ha-mcp-release.XXXXXX)
 app_root='/opt/ha-chatgpt-mcp'
@@ -129,6 +133,7 @@ prior_image_id=''
 prior_image_ref=''
 tested_image_id=''
 smoke_container="ha-mcp-release-smoke-$stamp"
+preflight_container="ha-mcp-release-preflight-$stamp"
 prior_collector_enabled='disabled'
 prior_collector_active='inactive'
 prior_collector_active_enter=''
@@ -172,6 +177,7 @@ record_marker() {
 }
 
 cleanup_staging() {
+  sudo docker rm -f "$preflight_container" >/dev/null 2>&1 || true
   sudo docker rm -f "$smoke_container" >/dev/null 2>&1 || true
   sudo docker image rm "$candidate_tag" >/dev/null 2>&1 || true
   sudo rm -rf -- "$release_stage"
@@ -495,6 +501,54 @@ sudo docker exec "$smoke_container" python -c \
   'import socket; socket.create_connection(("127.0.0.1", 8000), 1).close()'
 sudo docker rm -f "$smoke_container" >/dev/null
 
+stage='running_live_read_only_preflight'
+sudo docker run -d --name "$preflight_container" --network host --read-only \
+  --env-file "$app_root/.env" \
+  --env PUBLIC_BASE_URL=https://preflight.invalid \
+  --env PRODUCTION_VERIFY_BASE_URL=http://127.0.0.1:8001 \
+  --env MCP_LOCAL_BASE_URL=http://127.0.0.1:8001 \
+  --env MCP_ALLOWED_HOSTS=127.0.0.1,localhost \
+  --env HA_BASE_URL=http://127.0.0.1:8123 \
+  --env HA_TOKEN_FILE=/run/secrets/ha_token \
+  --env OAUTH_PASSWORD_HASH_FILE=/run/secrets/oauth_password_hash \
+  --env JWT_SECRET_FILE=/run/secrets/jwt_secret \
+  --env ORIGIN_SHARED_SECRET_FILE=/run/secrets/origin_shared_secret \
+  --env DATABASE_PATH=/data/oauth.sqlite3 \
+  --env AUDIT_LOG_PATH=/logs/audit.jsonl \
+  --env HA_CONFIG_PATH=/ha-config \
+  --env BACKUP_PATH=/backups \
+  --env HOST_DIAGNOSTICS_PATH=/host-diagnostics \
+  --volume "$app_root/secrets:/run/secrets:ro" \
+  --volume /opt/homeassistant/config:/ha-config:ro \
+  --volume /var/lib/ha-host-diagnostics/export:/host-diagnostics:ro \
+  --tmpfs /tmp:rw,noexec,nosuid,size=32m \
+  --tmpfs /data:rw,noexec,nosuid,size=32m \
+  --tmpfs /logs:rw,noexec,nosuid,size=32m \
+  --tmpfs /backups:rw,noexec,nosuid,size=32m \
+  --security-opt no-new-privileges:true --cap-drop ALL \
+  --entrypoint /app/.venv/bin/uvicorn "$candidate_tag" \
+  app.server:app --host 127.0.0.1 --port 8001 --no-proxy-headers
+for attempt in $(seq 1 30); do
+  if curl --fail --silent --max-time 5 http://127.0.0.1:8001/healthz \
+    >/tmp/ha-mcp-preflight-health.json; then
+    break
+  fi
+  sudo docker inspect -f '{{.State.Running}}' "$preflight_container" | grep -Fxq true
+  sleep 1
+done
+curl --fail --silent --max-time 5 http://127.0.0.1:8001/healthz \
+  >/tmp/ha-mcp-preflight-health.json
+python3 -c 'import json; p=json.load(open("/tmp/ha-mcp-preflight-health.json", encoding="utf-8")); assert p.get("status") == "ok" and p.get("service_version") == "2.7.3"'
+sudo docker exec "$preflight_container" python -m scripts.production_mcp_verify
+sudo docker rm -f "$preflight_container" >/dev/null
+rm -f /tmp/ha-mcp-preflight-health.json
+if [ "$preflight_only" = 1 ]; then
+  stage='preflight_complete'
+  printf 'Production candidate %s passed live read-only preflight; no service was deployed.\n' \
+    "$release_commit"
+  exit 0
+fi
+
 sudo install -d -o root -g root -m 0700 "$backup_root"
 sudo tar -czf "$app_backup" \
   --exclude='./secrets' --exclude='./data' --exclude='./logs' --exclude='./backups' \
@@ -654,7 +708,7 @@ with open('/tmp/ha-mcp-health.json', encoding='utf-8') as handle:
     payload = json.load(handle)
 assert payload.get('status') == 'ok'
 assert payload.get('home_assistant', {}).get('reachable') is True
-assert payload.get('service_version') == '2.7.2'
+assert payload.get('service_version') == '2.7.3'
 PY
 rm -f /tmp/ha-mcp-health.json
 curl --fail --silent --max-time 5 http://127.0.0.1:8123/ >/dev/null
@@ -788,7 +842,10 @@ try {
         (($renderedOverlayScript -replace "`r`n", "`n") + "`n"),
         [Text.UTF8Encoding]::new($false)
     )
-    $renderedRemoteScript = $remoteScript.Replace('__ARCHIVE_SHA256__', $archiveSha256)
+    $preflightFlag = if ($PreflightOnly) { '1' } else { '0' }
+    $renderedRemoteScript = $remoteScript.Replace('__ARCHIVE_SHA256__', $archiveSha256).Replace(
+        '__PREFLIGHT_ONLY__', $preflightFlag
+    )
     [IO.File]::WriteAllText(
         $remoteScriptPath,
         (($renderedRemoteScript -replace "`r`n", "`n") + "`n"),

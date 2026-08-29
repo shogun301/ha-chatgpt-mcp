@@ -5,11 +5,13 @@ from datetime import datetime
 import hashlib
 import ipaddress
 import json
+import os
 from pathlib import Path
 import re
 import time
 import uuid
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx2
 import jwt
@@ -36,9 +38,9 @@ DIAGNOSTIC_TOOLS = (
     "probe_lan_node",
 )
 LAN_PROBE_SERVICES = ("dns", "router_ssh")
-EXPECTED_VERSION = "2.7.2"
+EXPECTED_VERSION = "2.7.3"
 EXPECTED_TOOL_COUNT = 107
-CONTRACT_PATH = Path("/app/tests/fixtures/server-contract-2.7.2.json")
+CONTRACT_PATH = Path("/app/tests/fixtures/server-contract-2.7.3.json")
 NEW_CAPABILITY_TOOLS = {
     "get_capability_sync_status",
     "get_calendar_events",
@@ -110,10 +112,32 @@ _TOKEN_RE = re.compile(
 )
 _AWS_RE = re.compile(
     r"(?:\bAKIA[0-9A-Z]{16}\b|\barn:aws(?:-[a-z]+)?:|"
-    r"\b(?:i|subnet|sg|vpc)-[0-9a-f]{8,17}\b|(?<!\d)\d{12}(?!\d))",
+    r"\b(?:i|subnet|sg|vpc)-[0-9a-f]{8,17}\b|"
+    r"\baws[_ -]?account(?:[_ -]?id)?[\"']?\s*[=:]\s*[\"']?\d{12}(?!\d))",
     re.I,
 )
 _HOME_RE = re.compile(r"(?i)(?:\b[A-Z]:\\Users\\|/(?:home|Users)/[^/\s]+)")
+
+
+def _verification_base_url() -> str:
+    value = os.environ.get("PRODUCTION_VERIFY_BASE_URL", "").strip().rstrip("/")
+    if not value:
+        return config.PUBLIC_BASE_URL
+    parsed = urlsplit(value)
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname not in {"127.0.0.1", "localhost"}
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+        or parsed.port is None
+    ):
+        raise RuntimeError(
+            "PRODUCTION_VERIFY_BASE_URL must be an explicit loopback HTTP origin"
+        )
+    return value
 
 
 def _access_token(scope: str) -> str:
@@ -449,7 +473,7 @@ async def _session(scope: str, *, diagnostics_allowed: bool) -> dict[str, Any]:
         headers=headers, timeout=30, follow_redirects=False
     ) as client:
         async with streamable_http_client(
-            f"{config.PUBLIC_BASE_URL}/mcp", http_client=client
+            f"{_verification_base_url()}/mcp", http_client=client
         ) as transport:
             read_stream, write_stream = _transport_streams(transport)
             async with ClientSession(read_stream, write_stream) as session:
@@ -494,7 +518,12 @@ async def _session(scope: str, *, diagnostics_allowed: bool) -> dict[str, Any]:
                     if not diagnostics_allowed and not is_error:
                         raise AssertionError(f"{name} accepted an insufficient scope")
                     if diagnostics_allowed:
-                        _assert_sanitized(_serialized_result(result))
+                        try:
+                            _assert_sanitized(_serialized_result(result))
+                        except AssertionError as exc:
+                            raise AssertionError(
+                                f"{name} returned unsafe diagnostic output: {exc}"
+                            ) from exc
                     results[name] = not is_error
 
                 sprinkler_read_calls: dict[str, bool] = {}
@@ -506,7 +535,12 @@ async def _session(scope: str, *, diagnostics_allowed: bool) -> dict[str, Any]:
                         is_error = bool(getattr(result, "is_error", False))
                         if is_error:
                             raise AssertionError(f"{name} failed read-only production acceptance")
-                        _assert_sanitized(_serialized_result(result))
+                        try:
+                            _assert_sanitized(_serialized_result(result))
+                        except AssertionError as exc:
+                            raise AssertionError(
+                                f"{name} returned unsafe read output: {exc}"
+                            ) from exc
                         payload = _structured_result(result)
                         _validate_sprinkler_result(name, payload)
                         sprinkler_payloads[name] = payload
@@ -532,7 +566,7 @@ async def _session(scope: str, *, diagnostics_allowed: bool) -> dict[str, Any]:
 
 
 async def main() -> None:
-    endpoint = f"{config.PUBLIC_BASE_URL}/mcp"
+    endpoint = f"{_verification_base_url()}/mcp"
     await _raw_auth_checks(endpoint)
     read_only = await _session("mcp:read", diagnostics_allowed=False)
     least_privileged = await _session(

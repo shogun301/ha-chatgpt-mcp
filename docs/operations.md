@@ -5,7 +5,7 @@ the bounded home-LAN diagnostics added in MCP 2.5.0, and persistent Home
 Assistant capability synchronization added in MCP 2.6.0 and the SolarEdge
 one-sample power-flow artifact filter added in MCP 2.6.1, and exact configured
 sprinkler/forecast automation actions added in MCP 2.6.2.
-It also covers the transactional Wyze sprinkler overlay and typed MCP 2.7.2
+It also covers the transactional Wyze sprinkler overlay and typed MCP 2.7.3
 read/command boundary.
 It does not authorize device actions, ad hoc service restarts, firewall changes,
 or raw-log collection. The sole Home Assistant restart described below is the
@@ -66,18 +66,23 @@ Use the established production deployment script, which requires a clean Git
 checkout, exports the exact commit with `git archive`, validates every tracked
 build input, builds and smoke-tests the immutable image, runs the full suite
 with networking disabled, creates timestamped backups, installs or restarts the
-included systemd unit only when its immutable content hash changes, deploys the Wyze overlay and MCP 2.7.2 from one exact
+included systemd unit only when its immutable content hash changes, deploys the Wyze overlay and MCP 2.7.3 from one exact
 public commit, and performs read-only health checks.
 Do not hand-copy secrets or add a Docker-socket mount.
 
 Before deployment:
 
-1. Confirm the release version is 2.7.2 and the expected tool count is 107.
-2. Review the complete diff, especially OAuth scope defaults, fixed probe
+1. Confirm the release version is 2.7.3 and the expected tool count is 107.
+2. Run the exact clean commit with `deploy-production.ps1 -PreflightOnly` and
+   the normal production connection arguments. This starts an isolated,
+   loopback-only candidate, runs the hermetic suite and every live sprinkler
+   read acceptance call, invokes no command tool, removes the candidate, and
+   exits without replacing a service. A failed preflight is a hard stop.
+3. Review the complete diff, especially OAuth scope defaults, fixed probe
    targets, collector command constants, Compose mounts, and systemd hardening.
-3. Confirm backups exclude credentials and include the previous application,
+4. Confirm backups exclude credentials and include the previous application,
    Compose definition, collector code/unit, and rollback image reference.
-4. Require the public audit, manifest-integrity check, all unit/integration/
+5. Require the public audit, manifest-integrity check, all unit/integration/
    schema/security tests, exact-image hermetic suite, package build, startup
    smoke test, and GitHub CI to pass on the exact candidate commit.
 
@@ -150,9 +155,9 @@ failure:
    the pre-deployment baseline. There must be no new public listener, firewall
    or security-group opening, public route, or broadened tunnel permission.
    Confirm Cloudflare metrics port 49312 remains loopback-only.
-4. **MCP registry:** authenticated discovery reports version 2.7.2 and exactly
+4. **MCP registry:** authenticated discovery reports version 2.7.3 and exactly
    107 tools. Compare every live input schema, output schema, annotation, and
-   tool name with `tests/fixtures/server-contract-2.7.2.json`.
+   tool name with `tests/fixtures/server-contract-2.7.3.json`.
 5. **Sprinkler inventory:** compare the MCP normalized zone IDs, native IDs, and
    count with the read-only `wyzeapi.get_sprinkler_snapshot` response. The
    deployed configuration is eight zones, and acceptance fails if either side
@@ -172,7 +177,7 @@ failure:
    service during acceptance.
 9. **Capability persistence:** call `get_capability_sync_status` with refresh,
    require `in_sync`, verify a 300-second interval and a persisted baseline for
-    version 2.7.2, then confirm the file remains under `/data` across MCP restart.
+    version 2.7.3, then confirm the file remains under `/data` across MCP restart.
 10. **Persistence:** restart only the collector in a controlled maintenance
    check if necessary. Confirm prior ledgers remain readable and the next sample
    appends normally. Do not restart Home Assistant to test persistence.

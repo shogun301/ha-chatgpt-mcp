@@ -50,9 +50,11 @@ from scripts.production_mcp_verify import (
     SPRINKLER_COMMAND_TOOLS,
     SPRINKLER_READ_REQUESTS,
     _access_token,
+    _assert_sanitized,
     _assert_zone_inventory,
     _transport_streams,
     _validate_sprinkler_result,
+    _verification_base_url,
 )
 
 
@@ -97,6 +99,30 @@ class ProductionVerifierCompatibilityTests(unittest.TestCase):
 
     def test_verifier_uses_only_canonical_lan_services(self) -> None:
         self.assertTrue(set(LAN_PROBE_SERVICES).issubset(SERVICE_PORTS))
+
+    def test_preflight_transport_override_is_loopback_only(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"PRODUCTION_VERIFY_BASE_URL": "http://127.0.0.1:8001"},
+        ):
+            self.assertEqual(_verification_base_url(), "http://127.0.0.1:8001")
+        for unsafe in (
+            "https://example.invalid",
+            "http://192.0.2.1:8001",
+            "http://127.0.0.1:8001/path",
+        ):
+            with (
+                patch.dict(os.environ, {"PRODUCTION_VERIFY_BASE_URL": unsafe}),
+                self.assertRaisesRegex(RuntimeError, "loopback"),
+            ):
+                _verification_base_url()
+
+    def test_sanitizer_allows_native_twelve_digit_device_identifiers(self) -> None:
+        _assert_sanitized('{"native_zone_id":"123456789012"}')
+
+    def test_sanitizer_rejects_contextual_aws_account_identifiers(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "forbidden identifier"):
+            _assert_sanitized('{"aws_account_id":"123456789012"}')
 
     def test_gantt_acceptance_requires_aware_timestamps_and_evidence(self) -> None:
         payload = {
@@ -221,7 +247,7 @@ class ProductionVerifierSchemaTests(unittest.IsolatedAsyncioTestCase):
     async def test_all_production_verifier_requests_match_advertised_schemas(self) -> None:
         tools = {tool.name: tool for tool in await mcp.list_tools()}
         contract = json.loads(
-            Path("tests/fixtures/server-contract-2.7.2.json").read_text(encoding="utf-8")
+            Path("tests/fixtures/server-contract-2.7.3.json").read_text(encoding="utf-8")
         )
         self.assertEqual(EXPECTED_VERSION, SERVER_VERSION)
         self.assertEqual(EXPECTED_TOOL_COUNT, len(tools))
