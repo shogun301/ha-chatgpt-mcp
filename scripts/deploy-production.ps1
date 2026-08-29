@@ -162,56 +162,110 @@ cleanup_staging() {
 
 rollback() {
   set +e
-  record_marker rolled_back
-  sudo systemctl stop ha-host-diagnostics.service >/dev/null 2>&1
+  local rollback_failed=0
+  local restored_image_id=''
+  stage='rolling_back'
+  sudo systemctl stop ha-host-diagnostics.service >/dev/null 2>&1 || rollback_failed=1
   if [ -f "$app_backup" ]; then
     sudo find "$app_root" -mindepth 1 -maxdepth 1 \
       ! -name secrets ! -name data ! -name logs ! -name backups \
-      -exec rm -rf -- {} +
-    sudo tar -xzf "$app_backup" -C "$app_root"
-  fi
-  if [ "$collector_existed" -eq 1 ] && [ -f "$collector_backup" ]; then
-    sudo rm -rf -- "$collector_root"
-    sudo tar -xzf "$collector_backup" -C /
+      -exec rm -rf -- {} + || rollback_failed=1
+    sudo tar -xzf "$app_backup" -C "$app_root" || rollback_failed=1
   else
-    sudo rm -rf -- "$collector_root"
+    rollback_failed=1
   fi
-  if [ "$unit_existed" -eq 1 ] && [ -f "$unit_backup" ]; then
-    sudo install -o root -g root -m 0644 "$unit_backup" "$collector_unit"
+  if [ "$collector_existed" -eq 1 ]; then
+    if [ -f "$collector_backup" ]; then
+      sudo rm -rf -- "$collector_root" || rollback_failed=1
+      sudo tar -xzf "$collector_backup" -C / || rollback_failed=1
+    else
+      rollback_failed=1
+    fi
   else
-    sudo rm -f -- "$collector_unit"
+    sudo rm -rf -- "$collector_root" || rollback_failed=1
   fi
-  sudo systemctl daemon-reload
+  if [ "$unit_existed" -eq 1 ]; then
+    if [ -f "$unit_backup" ]; then
+      sudo install -o root -g root -m 0644 "$unit_backup" "$collector_unit" || rollback_failed=1
+    else
+      rollback_failed=1
+    fi
+  else
+    sudo rm -f -- "$collector_unit" || rollback_failed=1
+  fi
+  sudo systemctl daemon-reload || rollback_failed=1
   if [ "$unit_existed" -eq 1 ]; then
     if [[ "$prior_collector_enabled" == enabled* ]]; then
-      sudo systemctl enable ha-host-diagnostics.service >/dev/null 2>&1
+      sudo systemctl enable ha-host-diagnostics.service >/dev/null 2>&1 || rollback_failed=1
     else
-      sudo systemctl disable ha-host-diagnostics.service >/dev/null 2>&1
+      sudo systemctl disable ha-host-diagnostics.service >/dev/null 2>&1 || rollback_failed=1
     fi
     if [ "$prior_collector_active" = 'active' ]; then
-      sudo systemctl restart ha-host-diagnostics.service >/dev/null 2>&1
+      sudo systemctl restart ha-host-diagnostics.service >/dev/null 2>&1 || rollback_failed=1
     fi
   else
-    sudo systemctl disable ha-host-diagnostics.service >/dev/null 2>&1
+    sudo systemctl disable ha-host-diagnostics.service >/dev/null 2>&1 || rollback_failed=1
   fi
   if [ -n "$prior_image_id" ] && [ -n "$prior_image_ref" ]; then
-    sudo docker image tag "$rollback_tag" "$prior_image_ref"
+    sudo docker image tag "$rollback_tag" "$prior_image_ref" || rollback_failed=1
   fi
   if [ -f "$app_root/docker-compose.yml" ]; then
     cd "$app_root"
-    sudo docker compose up -d --no-deps --force-recreate ha-chatgpt-mcp cloudflared >/dev/null 2>&1
+    sudo docker compose up -d --no-deps --force-recreate ha-chatgpt-mcp cloudflared >/dev/null 2>&1 || rollback_failed=1
+  else
+    rollback_failed=1
+  fi
+  if [ -n "$prior_image_id" ]; then
+    restored_image_id=$(sudo docker container inspect -f '{{.Image}}' ha-chatgpt-mcp 2>/dev/null || true)
+    [ "$restored_image_id" = "$prior_image_id" ] || rollback_failed=1
+  fi
+  if [ "$unit_existed" -eq 1 ]; then
+    sudo test -f "$collector_unit" || rollback_failed=1
+    if [[ "$prior_collector_enabled" == enabled* ]]; then
+      sudo systemctl is-enabled --quiet ha-host-diagnostics.service || rollback_failed=1
+    else
+      ! sudo systemctl is-enabled --quiet ha-host-diagnostics.service || rollback_failed=1
+    fi
+    if [ "$prior_collector_active" = 'active' ]; then
+      sudo systemctl is-active --quiet ha-host-diagnostics.service || rollback_failed=1
+    else
+      ! sudo systemctl is-active --quiet ha-host-diagnostics.service || rollback_failed=1
+    fi
+  else
+    ! sudo test -e "$collector_unit" || rollback_failed=1
+    ! sudo systemctl is-active --quiet ha-host-diagnostics.service || rollback_failed=1
+  fi
+  if [ "$rollback_failed" -ne 0 ]; then
+    stage='rollback_failed'
+    record_status rollback_failed || true
+    set -e
+    return 1
+  fi
+  stage='rolled_back'
+  record_marker rolled_back || rollback_failed=1
+  record_status rolled_back || rollback_failed=1
+  if [ "$rollback_failed" -ne 0 ]; then
+    stage='rollback_failed'
+    record_status rollback_failed || true
+    set -e
+    return 1
   fi
   set -e
+  return 0
 }
 
 on_exit() {
   local exit_code=$?
+  local rollback_exit=0
   trap - EXIT
   if [ "$exit_code" -ne 0 ] && [ "$mutated" -eq 1 ]; then
     record_status failed
-    rollback
+    rollback || rollback_exit=$?
   fi
   cleanup_staging
+  if [ "$rollback_exit" -ne 0 ]; then
+    exit 125
+  fi
   exit "$exit_code"
 }
 trap on_exit EXIT
@@ -387,7 +441,7 @@ case "$ha_public_status" in
 esac
 curl --fail --silent --max-time 10 __PUBLIC_MCP_URL__/healthz >/dev/null
 curl --fail --silent --max-time 5 http://127.0.0.1:49312/metrics >/dev/null
-sudo docker compose exec -T ha-chatgpt-mcp python scripts/production_mcp_verify.py
+sudo docker compose exec -T ha-chatgpt-mcp python -m scripts.production_mcp_verify
 test "$(sudo docker container inspect -f '{{.State.StartedAt}}' homeassistant)" = "$homeassistant_started_before"
 test "$(sudo docker container inspect -f '{{.State.StartedAt}}' caddy)" = "$caddy_started_before"
 

@@ -456,6 +456,28 @@ class DeploymentScriptSecurityTests(unittest.TestCase):
         self.assertIn("tested_image_id=$(sudo docker image inspect", self.text)
         self.assertIn("docker container inspect -f '{{.Image}}' ha-chatgpt-mcp", self.text)
 
+    def test_production_verifier_runs_as_a_module_from_the_app_workdir(self) -> None:
+        self.assertIn(
+            "docker compose exec -T ha-chatgpt-mcp python -m scripts.production_mcp_verify",
+            self.text,
+        )
+        self.assertNotIn("python scripts/production_mcp_verify.py", self.text)
+
+    def test_rollback_fails_closed_unless_prior_image_is_restored(self) -> None:
+        rollback = self.text[
+            self.text.index("rollback() {") : self.text.index("on_exit() {")
+        ]
+        self.assertIn("restored_image_id=$(sudo docker container inspect", rollback)
+        self.assertIn('[ "$restored_image_id" = "$prior_image_id" ]', rollback)
+        self.assertIn("stage='rollback_failed'", rollback)
+        self.assertIn("record_status rollback_failed", rollback)
+        self.assertIn("record_status rolled_back", rollback)
+        self.assertNotIn(
+            "docker compose up -d --no-deps --force-recreate ha-chatgpt-mcp cloudflared >/dev/null 2>&1\n",
+            rollback,
+        )
+        self.assertIn("exit 125", self.text)
+
     def test_release_requires_public_tip_and_green_exact_commit_ci(self) -> None:
         self.assertIn("ls-remote", self.text)
         self.assertIn("refs/heads/main", self.text)
