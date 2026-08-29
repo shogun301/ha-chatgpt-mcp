@@ -455,6 +455,13 @@ class DeploymentScriptSecurityTests(unittest.TestCase):
         self.assertIn("ha_public_status=$(curl", self.text)
         self.assertIn("200|302|403", self.text)
         self.assertNotIn("curl --fail --silent --max-time 10 http://", self.text)
+        fixed = self.text[
+            self.text.index("stage='validating_fixed_routes'") :
+            self.text.index("stage='validating_runtime_hardening'")
+        ]
+        self.assertIn("for attempt in $(seq 1 30)", fixed)
+        self.assertIn('p.get("service_version") == "2.7.3"', fixed)
+        self.assertIn('[ "$fixed_routes_ready" -eq 1 ]', fixed)
 
     def test_retention_check_parses_full_iso_date_suffix(self) -> None:
         self.assertIn("dt.date.fromisoformat(path.stem[-10:])", self.text)

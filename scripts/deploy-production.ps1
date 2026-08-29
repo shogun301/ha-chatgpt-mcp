@@ -729,12 +729,23 @@ PY
 rm -f /tmp/ha-mcp-health.json
 curl --fail --silent --max-time 5 http://127.0.0.1:8123/ >/dev/null
 stage='validating_fixed_routes'
-ha_public_status=$(curl --silent --output /dev/null --max-time 10 --write-out '%{http_code}' __PUBLIC_FRONTEND_URL__/)
-case "$ha_public_status" in
-  200|302|403) ;;
-  *) exit 1 ;;
-esac
-curl --fail --silent --max-time 10 __PUBLIC_MCP_URL__/healthz >/dev/null
+fixed_routes_ready=0
+for attempt in $(seq 1 30); do
+  ha_public_status=$(curl --silent --output /dev/null --max-time 10 --write-out '%{http_code}' __PUBLIC_FRONTEND_URL__/ || true)
+  case "$ha_public_status" in
+    200|302|403)
+      if curl --fail --silent --max-time 10 __PUBLIC_MCP_URL__/healthz \
+          >/tmp/ha-mcp-public-health.json && \
+         python3 -c 'import json; p=json.load(open("/tmp/ha-mcp-public-health.json", encoding="utf-8")); assert p.get("status") == "ok" and p.get("service_version") == "2.7.3"'; then
+        fixed_routes_ready=1
+        break
+      fi
+      ;;
+  esac
+  sleep 1
+done
+[ "$fixed_routes_ready" -eq 1 ]
+rm -f /tmp/ha-mcp-public-health.json
 curl --fail --silent --max-time 5 http://127.0.0.1:49312/metrics >/dev/null
 sudo docker compose exec -T ha-chatgpt-mcp python -m scripts.production_mcp_verify
 test "$(sudo docker container inspect -f '{{.State.StartedAt}}' homeassistant)" = "$homeassistant_started_before"
