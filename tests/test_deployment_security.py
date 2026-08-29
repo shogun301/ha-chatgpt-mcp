@@ -405,7 +405,11 @@ class DeploymentScriptSecurityTests(unittest.TestCase):
             recreate, "deployment must use an explicit bounded recreation"
         )
         self.assertLess(test.start(), recreate.start())
-        self.assertRegex(test.group(0), r"--entrypoint\s+python\b")
+        self.assertRegex(
+            test.group(0), r"--entrypoint\s+/app/\.venv/bin/python\b"
+        )
+        self.assertIn('--volume "$release_root:/release:ro"', test.group(0))
+        self.assertRegex(test.group(0), r"--workdir\s+/release\b")
         self.assertNotRegex(test.group(0), r"docker\s+compose\s+run\b")
         self.assertRegex(recreate.group(0), r"\bha-chatgpt-mcp\b")
         self.assertNotRegex(recreate.group(0), r"(?:^|\s)homeassistant(?:\s|$)")

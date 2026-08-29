@@ -44,9 +44,11 @@ jobs:
         run: |
           set -Eeuo pipefail
           image="ha-chatgpt-mcp:$GITHUB_SHA"
+          release_dir="$(cat "$RUNNER_TEMP/ha-mcp-release-dir")"
           docker run --rm --network none --env HOME=/tmp \
             --env PYTHONDONTWRITEBYTECODE=1 --env RELEASE_ARCHIVE=1 \
-            --read-only --tmpfs /tmp --entrypoint python "$image" \
+            --read-only --tmpfs /tmp --volume "$release_dir:/release:ro" \
+            --workdir /release --entrypoint /app/.venv/bin/python "$image" \
             -m pytest tests collector/tests home_assistant/tests
       - name: Smoke-test exact image startup with a minimal sanitized environment
         run: |

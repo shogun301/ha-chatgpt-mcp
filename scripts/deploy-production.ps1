@@ -229,7 +229,8 @@ tested_image_id=$(sudo docker image inspect -f '{{.Id}}' "$candidate_tag")
 stage='running_hermetic_release_tests'
 sudo docker run --rm --network none --env HOME=/tmp \
   --env PYTHONDONTWRITEBYTECODE=1 --env RELEASE_ARCHIVE=1 \
-  --read-only --tmpfs /tmp --entrypoint python \
+  --read-only --tmpfs /tmp --volume "$release_root:/release:ro" \
+  --workdir /release --entrypoint /app/.venv/bin/python \
   "$candidate_tag" \
   -m pytest tests collector/tests home_assistant/tests
 stage='smoke_testing_release_image'
