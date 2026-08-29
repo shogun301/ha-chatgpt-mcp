@@ -9,7 +9,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$releaseVersion = '2.6.1'
+$releaseVersion = '2.6.2'
 $sourceRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $secretRoot = if ($SecretStagingPath) { [IO.Path]::GetFullPath($SecretStagingPath) } else { $null }
 $requiredSecrets = @(
@@ -61,8 +61,8 @@ set -Eeuo pipefail
 set +x
 umask 077
 
-release_version='2.6.1'
-archive_path='/tmp/ha-chatgpt-mcp-2.6.1.tar.gz'
+release_version='2.6.2'
+archive_path='/tmp/ha-chatgpt-mcp-2.6.2.tar.gz'
 app_root='/opt/ha-chatgpt-mcp'
 collector_root='/opt/ha-host-diagnostics'
 collector_program="$collector_root/ha_host_diagnostics.py"
@@ -269,7 +269,7 @@ with open('/tmp/ha-mcp-health.json', encoding='utf-8') as handle:
     payload = json.load(handle)
 assert payload.get('status') == 'ok'
 assert payload.get('home_assistant', {}).get('reachable') is True
-assert payload.get('service_version') == '2.6.1'
+assert payload.get('service_version') == '2.6.2'
 PY
 rm -f /tmp/ha-mcp-health.json
 curl --fail --silent --max-time 5 http://127.0.0.1:8123/ >/dev/null

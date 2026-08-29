@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.6.2 - 2026-08-29
+
+- Added a fail-closed automation exception for `button.press` that accepts only
+  one of at most three exact, deployment-configured sprinkler-zone buttons.
+  Other, unknown, multiple, or templated button targets remain rejected.
+- Added a separate exact daily `weather.get_forecasts` exception limited to one
+  configured weather entity, `type: daily`, and a bounded literal
+  `response_variable`. Automation creation and updates still require explicit
+  current-turn confirmation.
+- Split controller and zone entity prefixes so sanitized source can preserve
+  deployment-specific sprinkler entity naming through ignored runtime
+  configuration instead of committed household identifiers.
+
 ## 2.6.1 - 2026-08-27
 
 - Added a timestamp-deduplicated SolarEdge bridge filter that omits all six

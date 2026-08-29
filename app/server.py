@@ -67,7 +67,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 LOGGER = logging.getLogger("ha_chatgpt_mcp")
-SERVER_VERSION = "2.6.1"
+SERVER_VERSION = "2.6.2"
 audit = AuditLog(config.AUDIT_LOG_PATH)
 oauth = OAuthServer(
     OAuthStore(config.DATABASE_PATH),
@@ -291,8 +291,8 @@ SENSITIVE_URL_QUERY_KEYS = {
 }
 SPRINKLER_ZONES = {
     zone: (
-        f"number.{config.SPRINKLER_ENTITY_PREFIX}_zone_{zone}",
-        f"button.{config.SPRINKLER_ENTITY_PREFIX}_zone_{zone}",
+        f"number.{config.SPRINKLER_ZONE_ENTITY_PREFIX}_{zone}",
+        f"button.{config.SPRINKLER_ZONE_ENTITY_PREFIX}_{zone}",
     )
     for zone in range(1, config.SPRINKLER_ZONE_COUNT + 1)
 }
@@ -303,7 +303,7 @@ SPRINKLER_REMAINING = f"sensor.{config.SPRINKLER_ENTITY_PREFIX}_watering_time_re
 SPRINKLER_LAST_WATERING = f"sensor.{config.SPRINKLER_ENTITY_PREFIX}_last_watering"
 SPRINKLER_CONFIGURATION = f"sensor.{config.SPRINKLER_ENTITY_PREFIX}_configuration"
 SPRINKLER_ZONE_METADATA = {
-    zone: f"sensor.{config.SPRINKLER_ENTITY_PREFIX}_zone_{zone}_metadata"
+    zone: f"sensor.{config.SPRINKLER_ZONE_ENTITY_PREFIX}_{zone}_metadata"
     for zone in range(1, config.SPRINKLER_ZONE_COUNT + 1)
 }
 AUTOMATION_BLOCKED_DOMAINS = {
@@ -3972,14 +3972,16 @@ def _validate_automation_actions(value: Any) -> None:
         domain, name = service.split(".", 1)
         if not SERVICE_PART_RE.fullmatch(domain) or not SERVICE_PART_RE.fullmatch(name):
             raise ValueError("Invalid automation action service")
-        if domain in AUTOMATION_BLOCKED_DOMAINS:
+        sprinkler_button = domain == "button" and name == "press"
+        daily_forecast = domain == "weather" and name == "get_forecasts"
+        if domain in AUTOMATION_BLOCKED_DOMAINS and not sprinkler_button:
             raise ValueError(
                 f"Automation actions in the {domain} domain are not exposed"
             )
         allowed_services = ALLOWED_SERVICES.get(
             domain, set()
         ) | AUTOMATION_EXTRA_SERVICES.get(domain, set())
-        if name not in allowed_services:
+        if name not in allowed_services and not sprinkler_button and not daily_forecast:
             raise ValueError("That automation action service is not allowlisted")
         target = value.get("target")
         if domain != "notify" and target is None:
@@ -4003,6 +4005,38 @@ def _validate_automation_actions(value: Any) -> None:
             raise ValueError("Automation action data must be an object")
         if _contains_target_key(data):
             raise ValueError("Automation targets must use target.entity_id, not data")
+        if sprinkler_button:
+            if (
+                len(entity_ids) != 1
+                or entity_ids[0] not in config.AUTOMATION_SPRINKLER_BUTTON_ENTITIES
+            ):
+                raise ValueError(
+                    "button.press is limited to one configured sprinkler-zone button"
+                )
+            if data or "response_variable" in value:
+                raise ValueError(
+                    "Sprinkler button actions do not accept data or responses"
+                )
+        if daily_forecast:
+            if config.AUTOMATION_DAILY_FORECAST_ENTITY is None or entity_ids != [
+                config.AUTOMATION_DAILY_FORECAST_ENTITY
+            ]:
+                raise ValueError(
+                    "weather.get_forecasts is limited to the configured forecast entity"
+                )
+            if data != {"type": "daily"}:
+                raise ValueError("Automation forecasts must request daily data")
+            response_variable = value.get("response_variable")
+            if not isinstance(response_variable, str) or not SERVICE_PART_RE.fullmatch(
+                response_variable
+            ):
+                raise ValueError(
+                    "Automation forecasts require a bounded literal response_variable"
+                )
+            if "continue_on_error" in value and not isinstance(
+                value["continue_on_error"], bool
+            ):
+                raise ValueError("continue_on_error must be true or false")
     for item in value.values():
         _validate_automation_actions(item)
 

@@ -42,7 +42,7 @@ unrestricted service proxy.
 - **OAuth-native remote access:** authorization code flow with S256 PKCE,
   dynamic client registration, scoped access tokens, and MCP resource metadata.
 
-Version **2.6.1** currently advertises **99 tools**. See
+Version **2.6.2** currently advertises **99 tools**. See
 [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## Architecture
@@ -166,6 +166,15 @@ Do not bind Uvicorn directly to a public interface.
 Entity-specific variables in `.env.example` map the generic tool surface to one
 deployment's presence, notification, vacuum, sprinkler, thermostat, and schedule
 entities. Keep real entity IDs in local configuration, not in Git.
+
+Sprinkler controller entities and zone entities may use different prefixes;
+configure `SPRINKLER_ENTITY_PREFIX` and `SPRINKLER_ZONE_ENTITY_PREFIX`
+respectively. Automation service exceptions are disabled by default. To permit
+forecast-adjusted irrigation, set `AUTOMATION_SPRINKLER_BUTTON_ENTITIES` to no
+more than three comma-separated exact button IDs and
+`AUTOMATION_DAILY_FORECAST_ENTITY` to one exact weather entity. The validator
+then accepts only `button.press` for one configured button and only a daily
+`weather.get_forecasts` request with a bounded literal response variable.
 
 ### Required secret files
 

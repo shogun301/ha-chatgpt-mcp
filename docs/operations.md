@@ -3,7 +3,8 @@
 This runbook covers the read-only host diagnostics introduced in MCP 2.4.0 and
 the bounded home-LAN diagnostics added in MCP 2.5.0, and persistent Home
 Assistant capability synchronization added in MCP 2.6.0 and the SolarEdge
-one-sample power-flow artifact filter added in MCP 2.6.1.
+one-sample power-flow artifact filter added in MCP 2.6.1, and exact configured
+sprinkler/forecast automation actions added in MCP 2.6.2.
 It does not authorize device actions, service restarts, firewall changes, or
 raw-log collection.
 
@@ -61,12 +62,12 @@ completeness instead of being silently treated as healthy.
 Use the established production deployment script, which packages the collector
 with the application, creates timestamped backups, runs the full test suite in
 an isolated container, installs/enables the included systemd unit, deploys MCP
-   2.6.1, and performs read-only health checks. Do not hand-copy secrets or add a
+2.6.2, and performs read-only health checks. Do not hand-copy secrets or add a
 Docker-socket mount.
 
 Before deployment:
 
-1. Confirm the release version is 2.6.1 and the expected tool count is 99.
+1. Confirm the release version is 2.6.2 and the expected tool count is 99.
 2. Review the complete diff, especially OAuth scope defaults, fixed probe
    targets, collector command constants, Compose mounts, and systemd hardening.
 3. Confirm backups exclude credentials and include the previous application,
@@ -99,7 +100,7 @@ failure:
    the pre-deployment baseline. There must be no new public listener, firewall
    or security-group opening, public route, or broadened tunnel permission.
    Confirm Cloudflare metrics port 49312 remains loopback-only.
-4. **MCP registry:** authenticated discovery reports version 2.6.1 and exactly
+4. **MCP registry:** authenticated discovery reports version 2.6.2 and exactly
    99 tools, preserving the prior 89 names and adding capability sync,
    sprinkler, calendar, schedule, and time tools.
 5. **Authorization:** unauthenticated and invalid-token requests are rejected.
@@ -116,7 +117,7 @@ failure:
    issue a service call or change any device state.
 8. **Capability persistence:** call `get_capability_sync_status` with refresh,
    require `in_sync`, verify a 300-second interval and a persisted baseline for
-   version 2.6.1, then confirm the file remains under `/data` across MCP restart.
+   version 2.6.2, then confirm the file remains under `/data` across MCP restart.
 9. **Persistence:** restart only the collector in a controlled maintenance
    check if necessary. Confirm prior ledgers remain readable and the next sample
    appends normally. Do not restart Home Assistant to test persistence.

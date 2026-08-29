@@ -65,6 +65,7 @@ from app.server import (
     call_service,
     claims_context,
     clean_vacuum_rooms,
+    create_automation,
     create_calendar_event,
     get_calendar_events,
     get_home_overview,
@@ -81,6 +82,7 @@ from app.server import (
     send_mobile_notification,
     set_nest_fan_timer,
     set_time_value,
+    update_automation,
 )
 
 
@@ -88,7 +90,7 @@ class CloudToolSurfaceTests(unittest.TestCase):
     def test_server_advertises_expanded_typed_surface(self) -> None:
         tools = asyncio.run(mcp.list_tools())
         names = {tool.name for tool in tools}
-        self.assertEqual(mcp.version, "2.6.1")
+        self.assertEqual(mcp.version, "2.6.2")
         self.assertEqual(len(names), 99)
         self.assertTrue(
             {
@@ -653,6 +655,142 @@ class ConfigurationSafetyTests(unittest.TestCase):
             }
         )
         self.assertEqual(config["actions"][0]["action"], "input_text.set_value")
+
+    def test_automation_accepts_only_configured_sprinkler_buttons(self) -> None:
+        base = {
+            "alias": "Water one sprinkler zone",
+            "triggers": [{"trigger": "time", "at": "05:00:00"}],
+        }
+        configured = tuple(
+            f"button.sprinkler_controller_zone_{zone}" for zone in range(1, 4)
+        )
+        with patch(
+            "app.server.config.AUTOMATION_SPRINKLER_BUTTON_ENTITIES", configured
+        ):
+            for entity_id in configured:
+                config = _validate_automation_config(
+                    {
+                        **base,
+                        "actions": [
+                            {
+                                "action": "button.press",
+                                "target": {"entity_id": entity_id},
+                            }
+                        ],
+                    }
+                )
+                self.assertEqual(config["actions"][0]["target"]["entity_id"], entity_id)
+
+            rejected = (
+                "button.unrelated",
+                "button.sprinkler_controller_stop_all_zones",
+                "button.sprinkler_controller_zone_4",
+                "{{ sprinkler_button }}",
+            )
+            for entity_id in rejected:
+                with self.subTest(entity_id=entity_id), self.assertRaises(ValueError):
+                    _validate_automation_config(
+                        {
+                            **base,
+                            "actions": [
+                                {
+                                    "action": "button.press",
+                                    "target": {"entity_id": entity_id},
+                                }
+                            ],
+                        }
+                    )
+
+            for action in (
+                {
+                    "action": "button.press",
+                    "target": {"entity_id": list(configured[:2])},
+                },
+                {
+                    "action": "button.press",
+                    "target": {"entity_id": configured[0]},
+                    "data": {"unexpected": True},
+                },
+                {
+                    "action": "button.turn_on",
+                    "target": {"entity_id": configured[0]},
+                },
+            ):
+                with self.subTest(action=action), self.assertRaises(ValueError):
+                    _validate_automation_config({**base, "actions": [action]})
+
+        with patch("app.server.config.AUTOMATION_SPRINKLER_BUTTON_ENTITIES", ()):
+            with self.assertRaises(ValueError):
+                _validate_automation_config(
+                    {
+                        **base,
+                        "actions": [
+                            {
+                                "action": "button.press",
+                                "target": {"entity_id": configured[0]},
+                            }
+                        ],
+                    }
+                )
+
+    def test_automation_accepts_only_bounded_daily_home_forecast(self) -> None:
+        base = {
+            "alias": "Fetch forecast",
+            "triggers": [{"trigger": "time", "at": "05:00:00"}],
+        }
+        accepted = {
+            "action": "weather.get_forecasts",
+            "target": {"entity_id": "weather.forecast_home"},
+            "data": {"type": "daily"},
+            "response_variable": "daily_forecast",
+            "continue_on_error": True,
+        }
+        with patch(
+            "app.server.config.AUTOMATION_DAILY_FORECAST_ENTITY",
+            "weather.forecast_home",
+        ):
+            config = _validate_automation_config({**base, "actions": [accepted]})
+            self.assertEqual(
+                config["actions"][0]["response_variable"], "daily_forecast"
+            )
+
+            rejected = (
+                {**accepted, "target": {"entity_id": "weather.other"}},
+                {**accepted, "target": {"entity_id": "{{ weather_entity }}"}},
+                {key: value for key, value in accepted.items() if key != "data"},
+                {**accepted, "data": {"type": "hourly"}},
+                {
+                    key: value
+                    for key, value in accepted.items()
+                    if key != "response_variable"
+                },
+                {**accepted, "response_variable": "{{ result_name }}"},
+                {**accepted, "response_variable": "x" * 65},
+                {**accepted, "continue_on_error": "yes"},
+                {**accepted, "action": "weather.get_forecast"},
+            )
+            for action in rejected:
+                with self.subTest(action=action), self.assertRaises(ValueError):
+                    _validate_automation_config({**base, "actions": [action]})
+
+        with patch("app.server.config.AUTOMATION_DAILY_FORECAST_ENTITY", None):
+            with self.assertRaises(ValueError):
+                _validate_automation_config({**base, "actions": [accepted]})
+
+    def test_automation_create_and_update_still_require_confirmation(self) -> None:
+        automation = {
+            "alias": "Confirmed only",
+            "triggers": [{"trigger": "time", "at": "05:00:00"}],
+            "actions": [{"delay": "00:00:01"}],
+        }
+        with patch(
+            "app.server.ha.save_automation_config", new=AsyncMock()
+        ) as save_automation:
+            with self.assertRaises(PermissionError):
+                asyncio.run(create_automation("confirmed_only", automation, False))
+            with self.assertRaises(PermissionError):
+                asyncio.run(update_automation("confirmed_only", automation, False))
+        save_automation.assert_not_awaited()
 
     def test_automation_blocks_scripts_and_dynamic_services(self) -> None:
         base = {"alias": "Unsafe", "triggers": [{"trigger": "time", "at": "08:00:00"}]}

@@ -364,12 +364,12 @@ class DeploymentScriptSecurityTests(unittest.TestCase):
             if re.match(r"^\s*(?:sudo\s+)?install\b", line):
                 cls.install_commands.append(shlex.split(line.strip(), posix=True))
 
-    def test_release_is_pinned_to_2_6_1(self) -> None:
+    def test_release_is_pinned_to_2_6_2(self) -> None:
         self.assertRegex(
             self.text,
-            r"(?m)^\s*\$releaseVersion\s*=\s*['\"]2\.6\.1['\"]\s*$",
+            r"(?m)^\s*\$releaseVersion\s*=\s*['\"]2\.6\.2['\"]\s*$",
         )
-        self.assertRegex(self.text, r"(?m)^\s*release_version=['\"]2\.6\.1['\"]\s*$")
+        self.assertRegex(self.text, r"(?m)^\s*release_version=['\"]2\.6\.2['\"]\s*$")
 
     def test_tests_run_before_main_container_recreation(self) -> None:
         main = self.text[
