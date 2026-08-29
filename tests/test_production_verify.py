@@ -47,9 +47,12 @@ from scripts.production_mcp_verify import (
     EXPECTED_VERSION,
     LAN_PROBE_SERVICES,
     NEW_CAPABILITY_TOOLS,
-    SPRINKLER_SAFE_REQUESTS,
+    SPRINKLER_COMMAND_TOOLS,
+    SPRINKLER_READ_REQUESTS,
     _access_token,
+    _assert_zone_inventory,
     _transport_streams,
+    _validate_sprinkler_result,
 )
 
 
@@ -85,15 +88,102 @@ class ProductionVerifierCompatibilityTests(unittest.TestCase):
         )
         self.assertEqual(claims["aud"], "https://example.invalid/mcp")
 
-    def test_verifier_only_mutates_sprinkler_via_safe_refresh(self) -> None:
+    def test_verifier_never_executes_any_sprinkler_command(self) -> None:
         source = Path("scripts/production_mcp_verify.py").read_text(encoding="utf-8")
-        self.assertIn('"refresh_sprinkler",', source)
-        self.assertNotIn('session.call_tool("run_sprinkler_zone"', source)
-        self.assertNotIn('session.call_tool("run_sprinkler_sequence"', source)
-        self.assertNotIn('session.call_tool("stop_sprinklers"', source)
+        self.assertNotIn("refresh_sprinkler", SPRINKLER_READ_REQUESTS)
+        self.assertTrue(SPRINKLER_COMMAND_TOOLS.isdisjoint(SPRINKLER_READ_REQUESTS))
+        for name in SPRINKLER_COMMAND_TOOLS:
+            self.assertNotIn(f'session.call_tool("{name}"', source)
 
     def test_verifier_uses_only_canonical_lan_services(self) -> None:
         self.assertTrue(set(LAN_PROBE_SERVICES).issubset(SERVICE_PORTS))
+
+    def test_gantt_acceptance_requires_aware_timestamps_and_evidence(self) -> None:
+        payload = {
+            "window_started_at": "2026-08-29T00:00:00+00:00",
+            "window_ended_at": "2026-08-31T00:00:00+00:00",
+            "count": 1,
+            "omitted_ambiguous_timestamp_count": 0,
+            "intervals": [{
+                "zone_id": "zone-1", "zone_name": "Zone 1",
+                "started_at": "2026-08-29T01:00:00+00:00",
+                "ended_at": "2026-08-29T01:05:00+00:00",
+                "duration_seconds": 300, "duration_supported": True,
+                "duration_evidence": "calculated",
+                "commanded_duration_seconds": 300,
+                "commanded_duration_evidence": "commanded",
+                "source": "quick_run", "source_supported": True,
+                "source_evidence": "controller-reported", "outcome": "completed",
+                "outcome_supported": True,
+                "outcome_evidence": "controller-reported",
+                "interrupted": False, "interruption_supported": True,
+                "interruption_evidence": "inferred", "run_id": "run-1",
+                "program_id": "program-1",
+                "evidence_type": "controller-reported",
+            }],
+        }
+        _validate_sprinkler_result("get_sprinkler_history", payload)
+        payload["intervals"][0]["started_at"] = "2026-08-29T01:00:00"
+        with self.assertRaisesRegex(AssertionError, "time-zone-aware"):
+            _validate_sprinkler_result("get_sprinkler_history", payload)
+        interval = payload["intervals"][0]
+        interval["started_at"] = "2026-08-29T01:00:00+00:00"
+        interval.update({
+            "outcome": "unknown", "outcome_supported": False,
+            "outcome_evidence": None, "interrupted": None,
+            "interruption_supported": False, "interruption_evidence": None,
+        })
+        _validate_sprinkler_result("get_sprinkler_history", payload)
+        interval["outcome"] = "completed"
+        with self.assertRaisesRegex(AssertionError, "unsupported outcome"):
+            _validate_sprinkler_result("get_sprinkler_history", payload)
+
+    def test_acceptance_requires_explicit_unsupported_upstream_evidence(self) -> None:
+        unsupported = {
+            "supported": False,
+            "reason": "No verified upstream signal.",
+            "upstream_evidence": "Captured payload and installed library omit it.",
+        }
+        payload = {
+            "physical_feedback": unsupported,
+            "measured_flow": unsupported,
+            "electrical_load": unsupported,
+            "valve_faults": unsupported,
+        }
+        _validate_sprinkler_result("get_sprinkler_controller_diagnostics", payload)
+        payload["measured_flow"] = {"supported": False}
+        with self.assertRaisesRegex(AssertionError, "upstream limitation"):
+            _validate_sprinkler_result("get_sprinkler_controller_diagnostics", payload)
+
+    def test_zone_inventory_must_exactly_match_live_integration_snapshot(self) -> None:
+        mcp_payload = {
+            "count": 2,
+            "zones": [
+                {"zone_id": "zone-1", "native_zone_id": "native-a"},
+                {"zone_id": "zone-2", "native_zone_id": "native-b"},
+            ],
+        }
+        snapshot = {
+            "zones": [
+                {"zone_number": 1, "zone_id": "native-a"},
+                {"zone_number": 2, "zone_id": "native-b"},
+            ]
+        }
+        result = _assert_zone_inventory(mcp_payload, snapshot, configured_count=2)
+        self.assertEqual(result["integration_zone_count"], 2)
+        self.assertEqual(result["normalized_zone_ids"], ["zone-1", "zone-2"])
+        snapshot["zones"].append({"zone_number": 3, "zone_id": "native-c"})
+        with self.assertRaisesRegex(AssertionError, "exactly match"):
+            _assert_zone_inventory(mcp_payload, snapshot, configured_count=2)
+
+    def test_verifier_reads_snapshot_but_has_no_integration_command_endpoint(self) -> None:
+        source = Path("scripts/production_mcp_verify.py").read_text(encoding="utf-8")
+        self.assertIn("/api/services/wyzeapi/get_sprinkler_snapshot?return_response", source)
+        for command in (
+            "run_sprinkler_zone", "run_sprinkler_sequence", "stop_sprinkler",
+            "refresh_sprinkler",
+        ):
+            self.assertNotIn(f"/api/services/wyzeapi/{command}", source)
 
 
 class ProductionVerifierSchemaTests(unittest.IsolatedAsyncioTestCase):
@@ -131,7 +221,7 @@ class ProductionVerifierSchemaTests(unittest.IsolatedAsyncioTestCase):
     async def test_all_production_verifier_requests_match_advertised_schemas(self) -> None:
         tools = {tool.name: tool for tool in await mcp.list_tools()}
         contract = json.loads(
-            Path("tests/fixtures/server-contract-2.6.3.json").read_text(encoding="utf-8")
+            Path("tests/fixtures/server-contract-2.7.0.json").read_text(encoding="utf-8")
         )
         self.assertEqual(EXPECTED_VERSION, SERVER_VERSION)
         self.assertEqual(EXPECTED_TOOL_COUNT, len(tools))
@@ -144,6 +234,10 @@ class ProductionVerifierSchemaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             contract["tool_schema_sha256"],
             canonical({name: tool.input_schema for name, tool in tools.items()}),
+        )
+        self.assertEqual(
+            contract["tool_output_schema_sha256"],
+            canonical({name: tool.output_schema for name, tool in tools.items()}),
         )
         self.assertEqual(
             contract["tool_annotations_sha256"],
@@ -167,7 +261,7 @@ class ProductionVerifierSchemaTests(unittest.IsolatedAsyncioTestCase):
         requests = {
             "get_capability_sync_status": {"refresh": True},
             **DIAGNOSTIC_REQUESTS,
-            **SPRINKLER_SAFE_REQUESTS,
+            **SPRINKLER_READ_REQUESTS,
         }
         for name, arguments in requests.items():
             with self.subTest(tool=name):

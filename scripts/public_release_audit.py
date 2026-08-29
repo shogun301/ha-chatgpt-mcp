@@ -12,6 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SELF = Path(__file__).resolve()
+WYZE_OVERLAY_ROOT = ROOT / "home_assistant" / "wyzeapi_overlay"
 TEXT_SUFFIXES = {
     "",
     ".caddyfile",
@@ -51,6 +52,10 @@ SECRET_PATTERNS = {
 }
 EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@([A-Z0-9.-]+\.[A-Z]{2,})\b", re.I)
 IPV4_RE = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")
+USER_PROFILE_RE = re.compile(
+    r"(?i)(?:\b[A-Z]:[\\/](?:Users|Documents and Settings)[\\/][^\\/\s]+|"
+    r"/(?:home|Users)/[^/\s]+)"
+)
 DOCUMENTATION_NETWORKS = tuple(
     ipaddress.ip_network(value)
     for value in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24")
@@ -86,6 +91,12 @@ def audit_file(path: Path) -> list[str]:
     except (UnicodeDecodeError, OSError):
         return findings
     folded = text.casefold()
+    profile_path_scope = relative.startswith("home_assistant/wyzeapi_overlay/") or (
+        path.suffix.casefold() in {".md", ".txt", ".yaml", ".yml", ".json"}
+        and not relative.startswith(("tests/", "collector/tests/", "home_assistant/tests/"))
+    )
+    if profile_path_scope and USER_PROFILE_RE.search(text):
+        findings.append(f"{relative}: user-profile filesystem path")
     for fragment in FORBIDDEN_FRAGMENTS:
         if fragment in folded:
             findings.append(f"{relative}: private identifier {fragment!r}")
@@ -113,6 +124,37 @@ def audit_file(path: Path) -> list[str]:
             and not any(address in network for network in DOCUMENTATION_NETWORKS)
         ):
             findings.append(f"{relative}: private IPv4 address")
+    return findings
+
+
+def audit_overlay_distribution() -> list[str]:
+    if not WYZE_OVERLAY_ROOT.is_dir():
+        return ["home_assistant/wyzeapi_overlay: required overlay is missing"]
+    findings: list[str] = []
+    license_path = WYZE_OVERLAY_ROOT / "UPSTREAM_LICENSE"
+    notice_path = WYZE_OVERLAY_ROOT / "NOTICE"
+    readme_path = WYZE_OVERLAY_ROOT / "README.md"
+    for path in (license_path, notice_path, readme_path):
+        if not path.is_file():
+            findings.append(f"{path.relative_to(ROOT).as_posix()}: required attribution asset is missing")
+    if license_path.is_file():
+        text = license_path.read_text(encoding="utf-8")
+        if "Apache License" not in text or "Version 2.0" not in text:
+            findings.append("home_assistant/wyzeapi_overlay/UPSTREAM_LICENSE: Apache-2.0 text is incomplete")
+    if notice_path.is_file():
+        folded = notice_path.read_text(encoding="utf-8").casefold()
+        if "seckatie/ha-wyzeapi" not in folded or "modified" not in folded:
+            findings.append("home_assistant/wyzeapi_overlay/NOTICE: upstream and modification attribution is incomplete")
+    if readme_path.is_file():
+        folded = readme_path.read_text(encoding="utf-8").casefold()
+        for required in ("apache-2.0", "upstream_license", "notice"):
+            if required not in folded:
+                findings.append(f"home_assistant/wyzeapi_overlay/README.md: missing {required} attribution")
+    component = WYZE_OVERLAY_ROOT / "custom_components" / "wyzeapi"
+    for path in component.glob("*.py"):
+        header = "\n".join(path.read_text(encoding="utf-8").splitlines()[:8])
+        if "SPDX-License-Identifier: Apache-2.0" not in header:
+            findings.append(f"{path.relative_to(ROOT).as_posix()}: missing Apache-2.0 SPDX header")
     return findings
 
 
@@ -146,6 +188,7 @@ def main() -> int:
     findings = [
         item for path in candidate_paths(archive=args.archive) for item in audit_file(path)
     ]
+    findings.extend(audit_overlay_distribution())
     if args.history:
         findings.extend(audit_history())
     if findings:

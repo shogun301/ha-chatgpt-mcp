@@ -37,6 +37,7 @@ os.environ.update(
 (_root / "backups").mkdir()
 (_root / "host-diagnostics").mkdir()
 
+from app import config
 from app.audit import AuditLog
 from app.ha_client import (
     HomeAssistantClient,
@@ -90,8 +91,8 @@ class CloudToolSurfaceTests(unittest.TestCase):
     def test_server_advertises_expanded_typed_surface(self) -> None:
         tools = asyncio.run(mcp.list_tools())
         names = {tool.name for tool in tools}
-        self.assertEqual(mcp.version, "2.6.3")
-        self.assertEqual(len(names), 99)
+        self.assertEqual(mcp.version, "2.7.0")
+        self.assertEqual(len(names), 107)
         self.assertTrue(
             {
                 "get_home_overview",
@@ -141,6 +142,14 @@ class CloudToolSurfaceTests(unittest.TestCase):
                 "get_sprinkler_history",
                 "refresh_sprinkler",
                 "run_sprinkler_sequence",
+                "get_sprinkler_capabilities",
+                "get_sprinkler_command_status",
+                "list_sprinkler_schedules",
+                "get_sprinkler_upcoming_runs",
+                "get_sprinkler_weather_and_decisions",
+                "get_sprinkler_controller_diagnostics",
+                "run_sprinkler_zone_exact",
+                "run_sprinkler_sequence_exact",
                 "get_calendar_events",
                 "create_calendar_event",
                 "get_schedule",
@@ -310,15 +319,14 @@ class SprinklerTelemetryTests(unittest.TestCase):
         stop_time: str = "unknown",
         duration: str = "1",
     ) -> dict[str, dict]:
-        values = {
-            "number.sprinkler_controller_zone_1": duration,
-            "number.sprinkler_controller_zone_2": "24.55",
-            "number.sprinkler_controller_zone_3": "24.55",
-            "button.sprinkler_controller_zone_1": zone_1_time,
-            "button.sprinkler_controller_zone_2": "unknown",
-            "button.sprinkler_controller_zone_3": "unknown",
-            "button.sprinkler_controller_stop_all_zones": stop_time,
-        }
+        values = {"button.sprinkler_controller_stop_all_zones": stop_time}
+        for zone in range(1, config.SPRINKLER_ZONE_COUNT + 1):
+            values[f"number.sprinkler_controller_zone_{zone}"] = (
+                duration if zone == 1 else "24.55"
+            )
+            values[f"button.sprinkler_controller_zone_{zone}"] = (
+                zone_1_time if zone == 1 else "unknown"
+            )
         return {
             entity_id: {"entity_id": entity_id, "state": state, "attributes": {}}
             for entity_id, state in values.items()
@@ -386,7 +394,7 @@ class SprinklerTelemetryTests(unittest.TestCase):
                 "attributes": {"recent_runs": []},
             },
         }
-        for zone in (1, 2, 3):
+        for zone in range(1, config.SPRINKLER_ZONE_COUNT + 1):
             states[f"sensor.sprinkler_controller_zone_{zone}_metadata"] = {
                 "entity_id": f"sensor.sprinkler_controller_zone_{zone}_metadata",
                 "state": "enabled",
@@ -412,7 +420,7 @@ class SprinklerTelemetryTests(unittest.TestCase):
         self.assertEqual(result["controller"]["state"], "idle")
         self.assertTrue(result["telemetry"]["live_running_state_available"])
         self.assertFalse(result["telemetry"]["physical_state_verified"])
-        self.assertEqual(len(result["zones"]), 3)
+        self.assertEqual(len(result["zones"]), config.SPRINKLER_ZONE_COUNT)
 
 
 class IdentifierValidationTests(unittest.TestCase):

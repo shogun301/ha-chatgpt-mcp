@@ -10,6 +10,8 @@ from __future__ import annotations
 import ast
 import re
 import shlex
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -354,8 +356,11 @@ class CollectorUnitSecurityTests(unittest.TestCase):
             writable.extend(shlex.split(directive, posix=True))
         self.assertEqual(writable, ["/var/lib/ha-host-diagnostics"])
 
-    def test_deployment_restarts_collector_and_requires_fresh_snapshot(self) -> None:
+    def test_deployment_restarts_collector_only_when_content_hash_changes(self) -> None:
         deploy = (ROOT / "scripts" / "deploy-production.ps1").read_text(encoding="utf-8")
+        self.assertIn("collector_content_hash", deploy)
+        self.assertIn('[ "$collector_candidate_hash" != "$collector_installed_hash" ]', deploy)
+        self.assertIn('if [ "$collector_changed" -eq 1 ]; then', deploy)
         self.assertIn("sudo systemctl restart ha-host-diagnostics.service", deploy)
         self.assertIn("collector_started_epoch=$(date -u +%s)", deploy)
         self.assertIn("stage='awaiting_fresh_collector_snapshot'", deploy)
@@ -365,6 +370,8 @@ class CollectorUnitSecurityTests(unittest.TestCase):
         self.assertIn("(payload.get('collector') or {}).get('observed_at')", deploy)
         self.assertIn("sudo python3 - <<'PY'", deploy)
         self.assertNotIn("systemctl enable --now ha-host-diagnostics.service", deploy)
+        self.assertIn("stage='verifying_unchanged_collector'", deploy)
+        self.assertIn("ActiveEnterTimestampMonotonic", deploy)
 
 
 class DeploymentScriptSecurityTests(unittest.TestCase):
@@ -377,12 +384,12 @@ class DeploymentScriptSecurityTests(unittest.TestCase):
             if re.match(r"^\s*(?:sudo\s+)?install\b", line):
                 cls.install_commands.append(shlex.split(line.strip(), posix=True))
 
-    def test_release_is_pinned_to_2_6_3(self) -> None:
+    def test_release_is_pinned_to_2_7_0(self) -> None:
         self.assertRegex(
             self.text,
-            r"(?m)^\s*\$releaseVersion\s*=\s*['\"]2\.6\.3['\"]\s*$",
+            r"(?m)^\s*\$releaseVersion\s*=\s*['\"]2\.7\.0['\"]\s*$",
         )
-        self.assertRegex(self.text, r"(?m)^\s*release_version=['\"]2\.6\.3['\"]\s*$")
+        self.assertRegex(self.text, r"(?m)^\s*release_version=['\"]2\.7\.0['\"]\s*$")
 
     def test_tests_run_before_main_container_recreation(self) -> None:
         main = self.text[
@@ -478,6 +485,25 @@ class DeploymentScriptSecurityTests(unittest.TestCase):
         )
         self.assertIn("exit 125", self.text)
 
+    def test_only_changed_tunnel_is_recreated_with_symmetric_rollback(self) -> None:
+        self.assertIn("tunnel_config_hash", self.text)
+        self.assertIn("prior_tunnel_image_id", self.text)
+        self.assertIn("desired_tunnel_image_id", self.text)
+        self.assertIn('if [ "$tunnel_changed" -eq 1 ]; then', self.text)
+        self.assertNotIn(
+            "--force-recreate ha-chatgpt-mcp cloudflared",
+            self.text,
+        )
+        self.assertIn(
+            'test "$(sudo docker container inspect -f \'{{.State.StartedAt}}\' ha-chatgpt-cloudflared)" = "$prior_tunnel_started"',
+            self.text,
+        )
+        rollback = self.text[
+            self.text.index("rollback() {") : self.text.index("on_exit() {")
+        ]
+        self.assertIn("tunnel_rollback_tag", rollback)
+        self.assertIn("--force-recreate cloudflared", rollback)
+
     def test_release_requires_public_tip_and_green_exact_commit_ci(self) -> None:
         self.assertIn("ls-remote", self.text)
         self.assertIn("refs/heads/main", self.text)
@@ -529,16 +555,18 @@ class DeploymentScriptSecurityTests(unittest.TestCase):
         self.assertIn("0:10001:750", self.text)
         self.assertIn("root:10001:640", self.text)
 
-    def test_deployment_never_controls_home_assistant(self) -> None:
-        forbidden = (
-            r"(?mi)^\s*(?:sudo\s+)?docker\s+(?:container\s+)?(?:exec|restart|stop|kill|rm)\b[^\r\n]*(?:^|\s)['\"]?homeassistant['\"]?(?:\s|$)",
+    def test_deployment_controls_home_assistant_only_for_overlay_rollback(self) -> None:
+        self.assertEqual(self.text.count("docker restart homeassistant"), 1)
+        self.assertIn("rollback_overlay", self.text)
+        self.assertIn("overlay_target='/opt/homeassistant/config/custom_components/wyzeapi'", self.text)
+        self.assertNotRegex(
+            self.text,
             r"(?mi)^\s*(?:sudo\s+)?docker\s+compose\s+(?:exec|restart|stop|kill|rm|up)\b[^\r\n]*(?:^|\s)['\"]?homeassistant['\"]?(?:\s|$)",
+        )
+        self.assertNotRegex(
+            self.text,
             r"(?mi)^\s*(?:sudo\s+)?systemctl\s+(?:restart|stop|start|reload|try-restart)\b[^\r\n]*(?:home-assistant|homeassistant)(?:\.service)?(?:\s|$)",
         )
-        for pattern in forbidden:
-            self.assertNotRegex(self.text, pattern)
-        self.assertNotIn("/opt/homeassistant/config", self.text.lower())
-        self.assertNotIn("configuration.yaml", self.text.lower())
         self.assertNotRegex(
             self.text,
             r"(?mi)^\s*(?:sudo\s+)?(?:caddy|systemctl)\b[^\r\n]*(?:reload|restart|stop|start)[^\r\n]*caddy",
@@ -776,6 +804,129 @@ class CollectorSourceSecurityTests(unittest.TestCase):
                     loaded_names,
                     f"{name} must enforce behavior, not just document it",
                 )
+
+
+class WyzeOverlayDeploymentSecurityTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.text = (ROOT / "scripts" / "deploy-wyzeapi-overlay.ps1").read_text(
+            encoding="utf-8"
+        )
+
+    def test_exact_commit_archive_and_base_hash_guards_are_required(self) -> None:
+        self.assertIn("gitExe -C $sourceRoot archive", self.text)
+        self.assertIn("$ReleaseCommit $overlayPath", self.text)
+        self.assertIn("status --porcelain=v1 --untracked-files=all", self.text)
+        for name in (
+            "manifest.json", "__init__.py", "const.py", "irrigation.py",
+            "irrigation_data.py", "sensor.py", "services.yaml",
+        ):
+            self.assertIn(f"[{name}]", self.text)
+        self.assertIn("test \"$current\" = \"${base_hashes[$name]}\"", self.text)
+        self.assertIn("printf '%s  %s", self.text)
+        self.assertIn("sha256sum -c -", self.text)
+
+    def test_backup_validation_restart_and_rollback_are_transactional(self) -> None:
+        backup_at = self.text.index('sudo tar -czf "$backup"')
+        mutation_at = self.text.index("mutated=1")
+        self.assertLess(backup_at, mutation_at)
+        self.assertIn("python -m py_compile", self.text)
+        self.assertIn("yaml.safe_load", self.text)
+        self.assertIn("--script check_config --config /config", self.text)
+        self.assertGreaterEqual(self.text.count("docker restart homeassistant"), 2)
+        self.assertIn("restore_backup", self.text)
+        self.assertIn("exit_code=125", self.text)
+        self.assertIn("prior_hashes[$name]", self.text)
+        self.assertIn("assert_prior_runtime_restored", self.text)
+        self.assertIn("backup retained at %s", self.text)
+        self.assertNotIn("already_installed", self.text)
+        self.assertNotIn("config_entries/entry/reload", self.text)
+
+    def test_loaded_entry_services_and_controller_entities_are_verified(self) -> None:
+        self.assertIn('"type": "config_entries/get"', self.text)
+        self.assertIn('item.get("state") == "loaded"', self.text)
+        self.assertIn("wait_for_wyze_loaded", self.text)
+        self.assertIn("capture_loaded_entries", self.text)
+        self.assertIn("wait_for_loaded_entries", self.text)
+        self.assertIn("load(sys.argv[1]) <= load(sys.argv[2])", self.text)
+        self.assertIn("core.entity_registry", self.text)
+        self.assertIn("wait_for_controller_entities", self.text)
+        self.assertIn("after.get(entity_id) == available", self.text)
+        self.assertIn("wait_for_controller_entities /tmp/wyze-overlay-restored.json exact", self.text)
+        self.assertIn("before['entities'].items()", self.text)
+        self.assertIn("wyze-overlay-snapshot-zones.json", self.text)
+        self.assertIn("-watering-status", self.text)
+        self.assertIn("-zone-{zone['zone_number']}-metadata", self.text)
+        self.assertIn("set(before['services']) <= set(after['services'])", self.text)
+        self.assertIn("load('/tmp/wyze-overlay-restored.json') ==", self.text)
+
+    def test_acceptance_invokes_only_read_services(self) -> None:
+        for service in (
+            "get_sprinkler_snapshot", "get_sprinkler_schedule_runs",
+            "get_sprinkler_schedules", "get_sprinkler_capabilities",
+        ):
+            self.assertIn(service, self.text)
+        self.assertNotRegex(
+            self.text,
+            r"api/services/wyzeapi/(?:run_sprinkler|stop_sprinkler|refresh_sprinkler)",
+        )
+        self.assertIn("?return_response", self.text)
+        self.assertIn('item.get("integration_version") == "0.1.40"', self.text)
+
+    def test_main_deploy_orders_overlay_before_mcp_release(self) -> None:
+        main = (ROOT / "scripts" / "deploy-production.ps1").read_text(encoding="utf-8")
+        preflight_at = main.index("stage='running_host_security_tests'")
+        overlay_at = main.index("stage='deploying_wyze_overlay'")
+        cutover_at = main.index("stage='recreating_mcp'")
+        self.assertLess(preflight_at, overlay_at)
+        self.assertLess(overlay_at, cutover_at)
+        self.assertIn("gitExe -C $sourceRoot archive", main)
+        self.assertIn("$releaseCommit 'home_assistant/wyzeapi_overlay'", main)
+        self.assertIn('overlay_backup="/opt/homeassistant/wyzeapi-overlay-backups/', main)
+        self.assertNotIn("overlay_output=$(", main)
+        backup_at = main.index('sudo tar -czf "$overlay_backup"')
+        ownership_at = main.index("overlay_mutated=1", backup_at)
+        child_at = main.index('bash "/tmp/__OVERLAY_SCRIPT_NAME__" "$overlay_backup"')
+        injection_at = main.index("HA_MCP_FAIL_AFTER_OVERLAY_SUCCESS")
+        self.assertLess(backup_at, ownership_at)
+        self.assertLess(ownership_at, child_at)
+        self.assertLess(child_at, injection_at)
+        rollback = main[main.index("rollback() {") : main.index("on_exit() {")]
+        self.assertIn("rollback_overlay", rollback)
+        self.assertIn("sudo diff -qr --no-dereference", main)
+        self.assertIn("capture_loaded_entries_main", main)
+
+    def test_outer_overlay_rollback_failures_preserve_transaction_flag(self) -> None:
+        main = (ROOT / "scripts" / "deploy-production.ps1").read_text(encoding="utf-8")
+        remote = re.search(r"(?s)\$remoteScript = @'\r?\n(.*?)\r?\n'@", main)
+        self.assertIsNotNone(remote)
+        helper = re.search(
+            r"(?ms)^rollback_overlay\(\) \{\n.*?^\}", remote.group(1)
+        )
+        self.assertIsNotNone(helper)
+        self.assertIn("rollback_overlay || rollback_failed=1", remote.group(1))
+        self.assertIn('overlay_mutated=0', helper.group(0))
+        for failure in ("tar", "restart", "cmp"):
+            script = (
+                "set -u\n"
+                "overlay_mutated=1\n"
+                f"HA_MCP_FAIL_OVERLAY_ROLLBACK_STEP={failure}\n"
+                + helper.group(0)
+                + "\nset +e\nrollback_overlay\nrc=$?\n"
+                + "printf '%s %s\\n' \"$rc\" \"$overlay_mutated\"\n"
+            )
+            with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as handle:
+                handle.write(script)
+                path = Path(handle.name)
+            try:
+                completed = subprocess.run(
+                    ["bash", str(path)], capture_output=True, text=True, check=False
+                )
+            finally:
+                path.unlink(missing_ok=True)
+            with self.subTest(failure=failure):
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertEqual(completed.stdout.strip(), "1 1")
 
 
 if __name__ == "__main__":

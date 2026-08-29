@@ -1,0 +1,133 @@
+# SPDX-License-Identifier: Apache-2.0
+# Derived from SecKatie/ha-wyzeapi; modified for bounded sprinkler services.
+run_sprinkler_zone:
+  name: Run sprinkler zone
+  description: Run one enabled Wyze sprinkler zone for a bounded duration.
+  target:
+    device:
+      integration: wyzeapi
+  fields:
+    zone:
+      name: Zone
+      description: The zone number shown by the Wyze controller.
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 8
+          step: 1
+          mode: box
+    duration_minutes:
+      name: Duration in minutes (legacy)
+      description: Watering duration in minutes. Provide this or duration_seconds, never both.
+      required: false
+      selector:
+        number:
+          min: 1
+          max: 180
+          step: 1
+          unit_of_measurement: min
+          mode: box
+    duration_seconds:
+      name: Exact duration in seconds
+      description: Exact watering duration in seconds. Provide this or duration_minutes, never both.
+      required: false
+      selector:
+        number:
+          min: 60
+          max: 10800
+          step: 1
+          unit_of_measurement: s
+          mode: box
+    command_id:
+      name: Command ID
+      description: Optional 1-64 character caller correlation ID retained in command status.
+      required: false
+      selector:
+        text:
+
+run_sprinkler_sequence:
+  name: Run sprinkler sequence
+  description: Run an ordered sequence of enabled Wyze sprinkler zones.
+  target:
+    device:
+      integration: wyzeapi
+  fields:
+    zones:
+      name: Zones
+      description: A list of zone mappings with exactly one duration_seconds or duration_minutes field, and no duplicate zones.
+      required: true
+      example:
+        - zone: 1
+          duration_seconds: 600
+        - zone: 2
+          duration_minutes: 15
+      selector:
+        object:
+    command_id:
+      name: Command ID
+      description: Optional 1-64 character caller correlation ID retained in command status.
+      required: false
+      selector:
+        text:
+
+stop_sprinkler:
+  name: Stop sprinkler
+  description: Stop the currently running Wyze sprinkler schedule or quick run.
+  target:
+    device:
+      integration: wyzeapi
+  fields:
+    command_id:
+      name: Command ID
+      description: Optional 1-64 character caller correlation ID retained until idle observation or timeout.
+      required: false
+      selector:
+        text:
+
+refresh_sprinkler:
+  name: Refresh sprinkler
+  description: Request fresh Wyze sprinkler status, zone metadata, and run history.
+  target:
+    device:
+      integration: wyzeapi
+
+get_sprinkler_snapshot:
+  name: Get sprinkler snapshot
+  description: Return the cached normalized sprinkler snapshot without making a network request.
+  target:
+    device:
+      integration: wyzeapi
+
+get_sprinkler_schedule_runs:
+  name: Get sprinkler schedule runs
+  description: Fetch bounded controller-reported sprinkler run history with per-zone intervals.
+  target:
+    device:
+      integration: wyzeapi
+  fields:
+    limit:
+      name: Limit
+      description: Maximum number of native schedule-run records to return.
+      default: 100
+      required: false
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 1
+          mode: box
+
+get_sprinkler_schedules:
+  name: Get sprinkler schedules
+  description: Fetch safe known fields from native Wyze schedule definitions.
+  target:
+    device:
+      integration: wyzeapi
+
+get_sprinkler_capabilities:
+  name: Get sprinkler capabilities
+  description: Return the static supported and explicitly unsupported sprinkler capability contract.
+  target:
+    device:
+      integration: wyzeapi

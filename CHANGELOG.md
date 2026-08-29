@@ -1,5 +1,37 @@
 # Changelog
 
+## 2.7.0 - 2026-08-29
+
+- Added eight typed sprinkler tools for capability discovery, separated command
+  and controller state, native schedule reads, upcoming runs, weather/skip
+  decisions, redacted diagnostics, and exact-second zone/sequence commands.
+- Expanded all sprinkler reads with stable normalized zone IDs, retained native
+  identifiers, advanced zone configuration, modeled moisture labels, explicit
+  unsupported results, and provenance that never equates cloud/controller state
+  with physical valve feedback.
+- Rebuilt watering history as a rolling, default 48-hour one-row-per-zone Gantt
+  contract with time-zone-aware intervals, source/outcome/interruption fields,
+  command duration when available, run/program IDs, and controller-reported or
+  reconstructed evidence.
+- Added an Apache-2.0-attributed Home Assistant Wyze overlay with four
+  response-only services and exact-second command construction, plus a
+  base-hash-guarded transactional deployment with backup, full Home Assistant
+  restart, all-loaded-entry preservation, read-only acceptance, and automatic
+  inner plus MCP-cutover outer rollback.
+- Production acceptance now compares live input/output schemas and annotations
+  against the exact release contract and invokes every sprinkler read under
+  `mcp:read`; command tools are inspected but never executed. It independently
+  reconciles the eight-zone MCP inventory with the read-only integration
+  snapshot, including normalized and native zone IDs.
+- Deployment now restarts the diagnostics collector only when its immutable
+  content hash changes, recreates the tunnel only for a tunnel configuration or
+  image change, and otherwise cuts over only the MCP container. Overlay rollback
+  is fail-closed at every restore and verification step.
+- Confirmed upstream limits remain explicit: no verified native schedule
+  mutation/manual-run schema, lifetime-history pagination, raw Wyze weather
+  feed, full Sprinkler Plus calculation, physical valve-open signal, measured
+  flow, electrical load, or valve-fault telemetry.
+
 ## 2.6.3 - 2026-08-29
 
 - Builds and tests release images only from an exact Git archive of the public

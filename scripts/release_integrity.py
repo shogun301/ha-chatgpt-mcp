@@ -13,6 +13,19 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCKERFILE = ROOT / "Dockerfile"
+WYZE_OVERLAY_ROOT = ROOT / "home_assistant" / "wyzeapi_overlay"
+WYZE_OVERLAY_FILES = {
+    "README.md",
+    "UPSTREAM_LICENSE",
+    "NOTICE",
+    "custom_components/wyzeapi/__init__.py",
+    "custom_components/wyzeapi/const.py",
+    "custom_components/wyzeapi/irrigation.py",
+    "custom_components/wyzeapi/irrigation_data.py",
+    "custom_components/wyzeapi/manifest.json",
+    "custom_components/wyzeapi/sensor.py",
+    "custom_components/wyzeapi/services.yaml",
+}
 
 
 def _git(*args: str) -> str:
@@ -167,10 +180,84 @@ def verify_manifests() -> list[str]:
         "home_assistant.custom_components.solaredge_one_bridge": {
             "manifest.json", "strings.json", "translations/*.json",
         },
+        "home_assistant.wyzeapi_overlay": {"README.md", "UPSTREAM_LICENSE", "NOTICE"},
+        "home_assistant.wyzeapi_overlay.custom_components.wyzeapi": {
+            "manifest.json", "services.yaml",
+        },
     }
     if {key: set(value) for key, value in package_data.items()} != expected_data:
         raise AssertionError("Python package-data manifest is stale or incomplete")
     return references
+
+
+def verify_wyze_overlay(*, archive: bool) -> list[str]:
+    actual = {
+        path.relative_to(WYZE_OVERLAY_ROOT).as_posix()
+        for path in WYZE_OVERLAY_ROOT.rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts
+    }
+    if actual != WYZE_OVERLAY_FILES:
+        missing = sorted(WYZE_OVERLAY_FILES - actual)
+        extra = sorted(actual - WYZE_OVERLAY_FILES)
+        raise AssertionError(
+            f"Wyze overlay file set is incomplete or unexpected: missing={missing}, extra={extra}"
+        )
+    if not archive:
+        tracked = _tracked_files()
+        prefix = "home_assistant/wyzeapi_overlay/"
+        missing_tracked = sorted(
+            relative
+            for relative in WYZE_OVERLAY_FILES
+            if f"{prefix}{relative}" not in tracked
+        )
+        if missing_tracked:
+            raise AssertionError(f"Wyze overlay files are not tracked: {missing_tracked}")
+    readme = (WYZE_OVERLAY_ROOT / "README.md").read_text(encoding="utf-8")
+    manifest = json.loads(
+        (WYZE_OVERLAY_ROOT / "custom_components/wyzeapi/manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    required_guards = (
+        "version `0.1.39`",
+        "version `0.1.40`",
+        "8C1551778463D995413F6A71739ADC53D820DED0CB069EF08E7DBB7A6395F1BC",
+        "F69AF27ABBF54435C1A978DBF791F8CDA8D8500187FE4067EE90C18D661A2950",
+        "3AF7296A87C8B0EA0CDE2E98CE6A05BA81846FE8631D8DD09E5B1954E62DAC15",
+    )
+    for literal in required_guards:
+        if literal not in readme:
+            raise AssertionError(f"Wyze overlay base guard is missing {literal}")
+    if manifest.get("domain") != "wyzeapi" or manifest.get("version") != "0.1.40":
+        raise AssertionError("Wyze overlay manifest identity is stale")
+    return sorted(WYZE_OVERLAY_FILES)
+
+
+def verify_registry_contract() -> str:
+    version = str(
+        tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"][
+            "version"
+        ]
+    )
+    relative = f"tests/fixtures/server-contract-{version}.json"
+    path = ROOT / relative
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("version") != version:
+        raise AssertionError("registry contract version is stale")
+    count = payload.get("tool_count")
+    names = payload.get("tool_names")
+    if not isinstance(count, int) or not isinstance(names, list):
+        raise AssertionError("registry contract count or names are invalid")
+    if count != len(names) or len(names) != len(set(names)) or names != sorted(names):
+        raise AssertionError("registry contract tool names are incomplete or unstable")
+    for field in (
+        "tool_schema_sha256",
+        "tool_output_schema_sha256",
+        "tool_annotations_sha256",
+    ):
+        if not re.fullmatch(r"[0-9a-f]{64}", str(payload.get(field, ""))):
+            raise AssertionError(f"registry contract {field} is invalid")
+    return relative
 
 
 def verify_release_automation() -> None:
@@ -186,7 +273,9 @@ def verify_release_automation() -> None:
     for literal in (
         "git archive", "release_commit", "--network none", "collector/tests",
         "home_assistant/tests", "org.opencontainers.image.revision", "release_stage",
-        'chmod -R a+rX "$release_stage"',
+        'chmod -R a+rX "$release_stage"', "deploy-wyzeapi-overlay.ps1",
+        "$releaseCommit 'home_assistant/wyzeapi_overlay'",
+        "stage='deploying_wyze_overlay'", "rollback_overlay",
     ):
         if literal not in deploy:
             raise AssertionError(f"deployment is missing release gate: {literal}")
@@ -209,7 +298,9 @@ def main() -> int:
         "archive": args.archive,
         "docker_sources": verify_docker_inputs(archive=args.archive),
         "manifest_references": verify_manifests(),
+        "registry_contract": verify_registry_contract(),
         "version": verify_versions(),
+        "wyze_overlay_files": verify_wyze_overlay(archive=args.archive),
     }
     verify_release_automation()
     print(json.dumps(payload, indent=2, sort_keys=True))

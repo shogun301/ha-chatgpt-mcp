@@ -8,7 +8,7 @@ An OAuth-protected
 [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server for
 securely connecting ChatGPT, Codex, and other MCP clients to Home Assistant.
 
-The project exposes 99 typed tools for discovery, dashboards, schedules,
+The project exposes 107 typed tools for discovery, dashboards, schedules,
 climate, energy, media, cleaning, irrigation, automations, diagnostics, and
 carefully bounded device control. It keeps Home Assistant's API private and
 deliberately avoids becoming a generic shell, log reader, network scanner, or
@@ -27,9 +27,10 @@ unrestricted service proxy.
 - **Bounded writes:** climate, lights, scenes, media players, vacuums, covers,
   locks, sirens, notifications, dashboards, schedules, calendars, to-do items,
   and automations use validated inputs and narrow service allowlists.
-- **Sprinkler support:** live controller status, zone metadata, configuration,
-  watering history, telemetry refresh, zone or sequence starts, and idempotent
-  stop operations.
+- **Sprinkler support:** evidence-labelled controller and command status,
+  advanced zone configuration, modeled moisture, rolling per-zone history,
+  native schedule/upcoming-run reads, weather/skip decisions, exact-second zone
+  or sequence starts, and idempotent stop operations.
 - **Energy and SolarEdge:** production, module comparison, power flow, energy
   breakdowns, storage summaries, telemetry, alerts, and an optional Home
   Assistant bridge integration.
@@ -42,7 +43,7 @@ unrestricted service proxy.
 - **OAuth-native remote access:** authorization code flow with S256 PKCE,
   dynamic client registration, scoped access tokens, and MCP resource metadata.
 
-Version **2.6.3** currently advertises **99 tools**. See
+Version **2.7.0** currently advertises **107 tools**. See
 [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## Architecture
@@ -76,7 +77,7 @@ over a private network.
 | Dashboards and statistics | List/read/create/update dashboards; long-term statistics                  | Read/write                               |
 | Climate and schedules     | Targets, modes, fan modes, presets, weekly schedules, time helpers        | Read/write                               |
 | Media and cleaning        | Browse/play media, TTS, Cast dashboards, vacuum rooms and fan speed       | Read/write                               |
-| Irrigation                | Summary, zones, configuration, history, refresh, run, sequence, stop      | Read/write                               |
+| Irrigation                | Status, zones, Gantt history, schedules, weather, diagnostics, exact runs | Read/write                               |
 | Organization              | Calendars, to-do lists, automations, notifications                        | Read/write                               |
 | Energy                    | SolarEdge summaries, power flow, storage, telemetry, and alerts           | Read; optional authorization write       |
 | Operations                | Backups, capability drift, fixed routes, host/runtime, outages, LAN nodes | Read; backup creation is confirmed write |
@@ -176,6 +177,16 @@ more than three comma-separated exact button IDs and
 `AUTOMATION_DAILY_FORECAST_ENTITY` to one exact weather entity. The validator
 then accepts only `button.press` for one configured button and only a daily
 `weather.get_forecasts` request with a bounded literal response variable.
+
+Wyze's private sprinkler API has no stable official programming contract. The
+bundled [`home_assistant/wyzeapi_overlay`](home_assistant/wyzeapi_overlay/README.md)
+adds four response-only services and preserves exact native identifiers while
+normalizing zones as `zone-1` through `zone-8`. Every sprinkler output labels
+its evidence as commanded, controller-reported, calculated, inferred, or
+physically measured. Current state is never described as physical valve-open
+feedback. See the
+[capability matrix](docs/wyze-sprinkler-capability-matrix.md) for confirmed
+semantics and upstream limits.
 
 ### Required secret files
 
@@ -299,7 +310,20 @@ opinionated AWS Lightsail reference. It requires explicit AWS profile, region,
 instance, frontend URL, and MCP URL parameters; requires a clean Git tree;
 packages the exact reviewed commit with `git archive`; builds, hermetically
 tests, and smoke-tests the immutable image; creates backups; deploys the
-collector and container; verifies source identity; and supports rollback.
+transactional Wyze overlay and MCP container; verifies source identity; and
+supports rollback. The host collector is installed or restarted only when an
+immutable three-file content hash changes, and the tunnel is recreated only
+when its own configuration block or image ID changes. The overlay deployer takes a guarded backup, requires
+the exact 0.1.39 base hashes, validates Python/YAML/Home Assistant configuration,
+restarts only Home Assistant, calls only four response-only read services, and
+restores the backup plus restarts Home Assistant on failure. The combined
+deployer finishes all MCP build, image, hermetic test, and smoke-test gates
+before applying the overlay immediately ahead of MCP cutover. Any later MCP
+cutover or acceptance failure restores both the prior MCP image and the prior
+overlay so incompatible halves are never accepted as the final state.
+Read-only acceptance also reconciles all eight configured normalized MCP zones
+and retained native IDs against the live integration snapshot so a successful
+but truncated controller inventory cannot pass.
 Review it carefully before adapting it to another host.
 
 Before every public push or production release:

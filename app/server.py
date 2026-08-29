@@ -61,13 +61,48 @@ from .solaredge_portal import (
     SolarEdgePortalConfig,
     SolarEdgePortalError,
 )
+from .sprinkler import (
+    CapabilityItem,
+    CommandObservation,
+    ConfigurationValue,
+    ControllerState,
+    CycleSoak,
+    EntityStateSummary,
+    NativeSchedule,
+    NativeScheduleZone,
+    SprinklerCapabilities,
+    SprinklerCommandResult,
+    SprinklerCommandStatus,
+    SprinklerConfiguration,
+    SprinklerDiagnostics,
+    SprinklerHistory,
+    SprinklerHistoryInterval,
+    SprinklerRefreshResult,
+    SprinklerScheduleList,
+    SprinklerSummary,
+    SprinklerUpcomingRuns,
+    SprinklerWeatherDecisions,
+    SprinklerZoneList,
+    StateEvidence,
+    TelemetryProvenance,
+    ThresholdValue,
+    UnsupportedSignal,
+    UpcomingRun,
+    WeatherDecision,
+    ZoneCapability,
+    ZoneEvent,
+    normalized_zone_id,
+    timestamp_to_iso,
+    unwrap_provider_response,
+    zone_number_from_id,
+)
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 LOGGER = logging.getLogger("ha_chatgpt_mcp")
-SERVER_VERSION = "2.6.3"
+SERVER_VERSION = "2.7.0"
 audit = AuditLog(config.AUDIT_LOG_PATH)
 oauth = OAuthServer(
     OAuthStore(config.DATABASE_PATH),
@@ -296,6 +331,13 @@ SPRINKLER_ZONES = {
     )
     for zone in range(1, config.SPRINKLER_ZONE_COUNT + 1)
 }
+SPRINKLER_RESERVED_ZONE_ENTITIES = {
+    domain: {
+        f"{domain}.{config.SPRINKLER_ZONE_ENTITY_PREFIX}_{zone}"
+        for zone in range(1, 9)
+    }
+    for domain in ("button", "number")
+}
 SPRINKLER_STOP = f"button.{config.SPRINKLER_ENTITY_PREFIX}_stop_all_zones"
 SPRINKLER_STATUS = f"sensor.{config.SPRINKLER_ENTITY_PREFIX}_watering_status"
 SPRINKLER_ACTIVE_ZONE = f"sensor.{config.SPRINKLER_ENTITY_PREFIX}_active_zone"
@@ -382,6 +424,49 @@ LanService = Literal[
 ]
 
 
+def _sanitize_tool_result(value: Any) -> Any:
+    """Redact typed and untyped tool output before MCP serialization."""
+    if isinstance(value, BaseModel):
+        result_type = type(value)
+        original = value.model_dump(mode="json")
+        safe_value = redact_sensitive(original)
+
+        def restore_nulls(original_value: Any, safe_result: Any) -> None:
+            if not isinstance(original_value, dict) or not isinstance(safe_result, dict):
+                return
+            for child_key, child_value in original_value.items():
+                if child_value is None:
+                    safe_result[child_key] = None
+                elif isinstance(child_value, dict):
+                    restore_nulls(child_value, safe_result.get(child_key))
+                elif isinstance(child_value, list) and isinstance(
+                    safe_result.get(child_key), list
+                ):
+                    for original_item, safe_item in zip(
+                        child_value, safe_result[child_key], strict=False
+                    ):
+                        restore_nulls(original_item, safe_item)
+
+        restore_nulls(original, safe_value)
+        # These exact fields describe availability, evidence, or redaction;
+        # they are not themselves network identifiers. Preserve no similarly
+        # named values because the broad key redactor is intentionally strict.
+        for key in (
+            "ip_address_supported",
+            "ip_address_evidence",
+            "ip_address_redacted",
+            "ssid_supported",
+            "ssid_evidence",
+            "ssid_redacted",
+        ):
+            if key in original:
+                safe_value[key] = original[key]
+        return result_type.model_validate(safe_value)
+    if isinstance(value, (dict, list, tuple, str)):
+        return redact_sensitive(value)
+    return value
+
+
 class RedactingMCPServer(MCPServer):
     """Apply the output sanitizer after every tool body and before MCP serialization."""
 
@@ -396,8 +481,7 @@ class RedactingMCPServer(MCPServer):
         raw_result = await self._tool_manager.call_tool(
             name, arguments, context, convert_result=False
         )
-        if isinstance(raw_result, (dict, list, tuple, str)):
-            raw_result = redact_sensitive(raw_result)
+        raw_result = _sanitize_tool_result(raw_result)
         tool = self._tool_manager.get_tool(name)
         if tool is None:
             raise ValueError(f"Unknown tool: {name}")
@@ -432,6 +516,13 @@ class SprinklerSequenceEntry(BaseModel):
     duration_minutes: Annotated[float, Field(ge=1, le=180)]
 
 
+class SprinklerExactSequenceEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    zone_id: Annotated[str, Field(pattern=r"^zone-[1-8]$")]
+    duration_seconds: Annotated[int, Field(strict=True, ge=60, le=10_800)]
+
+
 mcp = RedactingMCPServer(
     config.MCP_DISPLAY_NAME,
     version=SERVER_VERSION,
@@ -462,6 +553,13 @@ def _require_write() -> None:
     scopes = set(str((claims or {}).get("scope", "")).split())
     if "mcp:write" not in scopes:
         raise PermissionError("This connection is not authorized for write tools")
+
+
+def _require_sprinkler_write(operation: str) -> None:
+    """Authorize only the deliberately exposed controller-scoped operations."""
+    _require_write()
+    if operation not in {"run_zone", "run_sequence", "stop", "refresh"}:
+        raise PermissionError("This sprinkler operation is not authorized")
 
 
 def _require_diagnostics() -> None:
@@ -2800,6 +2898,10 @@ async def set_number_value(entity_id: str, value: float) -> dict[str, Any]:
     domain = entity_id.split(".", 1)[0]
     if domain not in {"number", "input_number"}:
         raise ValueError("entity_id must be a number or input_number entity")
+    if entity_id in SPRINKLER_RESERVED_ZONE_ENTITIES["number"]:
+        raise PermissionError(
+            "Sprinkler duration entities are reserved for dedicated sprinkler tools"
+        )
     current = await ha.state(entity_id)
     attributes = current.get("attributes") or {}
     minimum = float(attributes.get("min", float("-inf")))
@@ -2842,6 +2944,13 @@ async def press_button(entity_id: str, confirmed: bool = False) -> dict[str, Any
     validate_entity_id(entity_id)
     if not entity_id.startswith("button."):
         raise ValueError("entity_id must be a button entity")
+    sprinkler_buttons = SPRINKLER_RESERVED_ZONE_ENTITIES["button"] | {
+        SPRINKLER_STOP
+    }
+    if entity_id in sprinkler_buttons:
+        raise PermissionError(
+            "Sprinkler buttons are reserved for dedicated sprinkler tools"
+        )
     result = await ha.call_service("button", "press", {"entity_id": entity_id})
     _audit_tool("press_button", entity_id=entity_id)
     return {"status": "accepted", "entity_id": entity_id, "result": result}
@@ -3523,6 +3632,201 @@ async def _sprinkler_device_id() -> str:
     return str(matches[0]["device_id"])
 
 
+async def _sprinkler_response(
+    service: str, data: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Call one read-only integration response service for the exact controller."""
+    device_id = await _sprinkler_device_id()
+    response = await ha.call_service_response(
+        "wyzeapi", service, data or {}, {"device_id": [device_id]}
+    )
+    return unwrap_provider_response(response)
+
+
+def _first(mapping: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = mapping.get(key)
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def _as_int(value: Any) -> int | None:
+    try:
+        return round(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in {0, 1}:
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "on", "1"}:
+            return True
+        if normalized in {"false", "no", "off", "0"}:
+            return False
+    return None
+
+
+def _state_evidence(value: Any, *, default: StateEvidence) -> StateEvidence:
+    normalized = str(value or "").strip().lower().replace("_", "-")
+    if normalized in {
+        "commanded",
+        "controller-reported",
+        "calculated",
+        "inferred",
+        "physically-measured",
+    }:
+        return normalized  # type: ignore[return-value]
+    if normalized in {"reconstructed", "unsupported"}:
+        return "inferred"
+    return default
+
+
+def _entity_state_summary(state: dict[str, Any]) -> EntityStateSummary:
+    summary = summarize_state(state)
+    return EntityStateSummary(
+        entity_id=str(summary.get("entity_id") or "unknown.unknown"),
+        state=summary.get("state"),
+        friendly_name=summary.get("friendly_name"),
+        device_class=summary.get("device_class"),
+        unit_of_measurement=summary.get("unit_of_measurement"),
+        last_changed=timestamp_to_iso(summary.get("last_changed")),
+        last_updated=timestamp_to_iso(summary.get("last_updated")),
+    )
+
+
+def _configuration_values(attributes: dict[str, Any]) -> list[ConfigurationValue]:
+    """Flatten provider configuration into typed, non-object extension values."""
+    values: list[ConfigurationValue] = []
+
+    def visit(prefix: str, value: Any) -> None:
+        if isinstance(value, dict):
+            for key, child in sorted(value.items()):
+                visit(f"{prefix}.{key}" if prefix else str(key), child)
+            return
+        if isinstance(value, list):
+            if all(
+                item is None or isinstance(item, (str, int, float, bool))
+                for item in value
+            ):
+                values.append(ConfigurationValue(name=prefix, value=value))
+            return
+        if value is None or isinstance(value, (str, int, float, bool)):
+            values.append(ConfigurationValue(name=prefix, value=value))
+
+    for key, value in sorted(attributes.items()):
+        if key not in {
+            "friendly_name",
+            "icon",
+            "device_class",
+            "unit_of_measurement",
+        }:
+            visit(str(key), value)
+    return values
+
+
+def _zone_event(item: dict[str, Any]) -> ZoneEvent:
+    return ZoneEvent(
+        event_id=str(item["event_id"]) if item.get("event_id") is not None else None,
+        event_type=(
+            str(item["event_type"]) if item.get("event_type") is not None else None
+        ),
+        state=str(item["state"]) if item.get("state") is not None else None,
+        reason=str(item["reason"]) if item.get("reason") is not None else None,
+        occurred_at=timestamp_to_iso(item.get("occurred_at")),
+        source=str(item["source"]) if item.get("source") is not None else None,
+        evidence=_state_evidence(
+            item.get("evidence_type"), default="controller-reported"
+        ),
+    )
+
+
+def _watering_state_value(value: Any) -> tuple[str, bool]:
+    """Normalize a tri-state watering signal without losing explicit false."""
+    if isinstance(value, bool):
+        return ("watering" if value else "idle", True)
+    text = str(value or "unknown").strip().lower()
+    return text, text not in {
+        "",
+        "unknown",
+        "unavailable",
+        "offline",
+        "disconnected",
+        "not_connected",
+        "none",
+        "null",
+    }
+
+
+def _zone_model(record: dict[str, Any]) -> ZoneCapability:
+    zone_number = int(record["zone"])
+    duration_minutes = record.get("configured_duration_minutes")
+    configured_seconds = (
+        round(float(duration_minutes) * 60)
+        if duration_minutes is not None
+        else _as_int(record.get("configured_duration_seconds"))
+    )
+    moisture = _first(
+        record,
+        "modeled_soil_moisture_native_value",
+        "modeled_soil_moisture",
+        "moisture_percent",
+        "soil_moisture_level_at_end_of_day_pct",
+        "soil_moisture_percent",
+    )
+    return ZoneCapability(
+        zone_id=normalized_zone_id(zone_number),
+        zone_number=zone_number,
+        native_zone_id=(
+            str(record["native_zone_id"])
+            if record.get("native_zone_id") is not None
+            else None
+        ),
+        zone_name=record.get("name") or record.get("zone_name"),
+        enabled=record.get("enabled") is True,
+        configured_duration_seconds=configured_seconds,
+        smart_duration_seconds=_as_int(record.get("smart_duration_seconds")),
+        soil_type=record.get("soil_type"),
+        vegetation_type=record.get("vegetation_type") or record.get("crop_type"),
+        sun_exposure=record.get("sun_exposure") or record.get("exposure_type"),
+        slope=record.get("slope") or record.get("slope_type"),
+        nozzle_type=record.get("nozzle_type"),
+        area=record.get("area"),
+        area_unit="upstream_unspecified" if record.get("area") is not None else None,
+        flow_rate=record.get("flow_rate"),
+        flow_rate_unit=(
+            "upstream_unspecified" if record.get("flow_rate") is not None else None
+        ),
+        flow_rate_evidence=(
+            "controller-reported" if record.get("flow_rate") is not None else None
+        ),
+        flow_rate_physically_measured=False,
+        available_water_capacity=record.get("available_water_capacity"),
+        crop_coefficient=record.get("crop_coefficient"),
+        efficiency=record.get("efficiency"),
+        allowed_depletion=record.get("allowed_depletion"),
+        root_depth=record.get("root_depth"),
+        head_count=_as_int(record.get("head_count")),
+        modeled_soil_moisture_native_value=(
+            float(moisture) if moisture is not None else None
+        ),
+        moisture_unit="upstream_unspecified" if moisture is not None else None,
+        moisture_evidence="calculated" if moisture is not None else None,
+        wired=record.get("wired"),
+        recent_events=[
+            _zone_event(item)
+            for item in record.get("recent_events") or []
+            if isinstance(item, dict)
+        ],
+        last_updated=record.get("last_updated"),
+    )
+
+
 async def _sprinkler_zone_records() -> list[dict[str, Any]]:
     entity_ids = list(SPRINKLER_ZONE_METADATA.values()) + [
         pair[0] for pair in SPRINKLER_ZONES.values()
@@ -3543,14 +3847,35 @@ async def _sprinkler_zone_records() -> list[dict[str, Any]]:
             {
                 "zone": zone,
                 "name": attributes.get("name"),
+                "native_zone_id": _first(attributes, "zone_id", "native_zone_id", "id"),
                 "enabled": attributes.get("enabled") is True,
                 "configured_duration_minutes": configured_duration,
-                "smart_duration_seconds": attributes.get("smart_duration"),
+                "smart_duration_seconds": _first(
+                    attributes, "smart_duration_seconds", "smart_duration"
+                ),
                 "crop_type": attributes.get("crop_type"),
                 "exposure_type": attributes.get("exposure_type"),
                 "nozzle_type": attributes.get("nozzle_type"),
                 "slope_type": attributes.get("slope_type"),
                 "soil_type": attributes.get("soil_type"),
+                "area": attributes.get("area"),
+                "flow_rate": attributes.get("flow_rate"),
+                "available_water_capacity": _first(
+                    attributes, "available_water_capacity", "available_water"
+                ),
+                "crop_coefficient": attributes.get("crop_coefficient"),
+                "efficiency": attributes.get("efficiency"),
+                "allowed_depletion": attributes.get("allowed_depletion"),
+                "root_depth": attributes.get("root_depth"),
+                "head_count": attributes.get("head_count"),
+                "modeled_soil_moisture_native_value": _first(
+                    attributes,
+                    "modeled_soil_moisture_native_value",
+                    "soil_moisture_level_at_end_of_day_pct",
+                    "modeled_soil_moisture",
+                ),
+                "wired": attributes.get("wired"),
+                "recent_events": list(attributes.get("latest_events") or [])[:10],
                 "last_updated": metadata.get("last_updated"),
             }
         )
@@ -3558,7 +3883,7 @@ async def _sprinkler_zone_records() -> list[dict[str, Any]]:
 
 
 @mcp.tool(title="Get sprinkler summary", annotations=READ)
-async def get_sprinkler_summary() -> dict[str, Any]:
+async def get_sprinkler_summary() -> SprinklerSummary:
     """Read live controller state, active-zone timing, and all configured zones."""
     status, active, remaining, last, zones = await asyncio.gather(
         ha.state(SPRINKLER_STATUS),
@@ -3569,70 +3894,1374 @@ async def get_sprinkler_summary() -> dict[str, Any]:
     )
     status_attributes = dict(status.get("attributes") or {})
     _audit_tool("get_sprinkler_summary")
-    return {
-        "controller": summarize_state(status),
-        "active_zone": summarize_state(active),
-        "remaining": summarize_state(remaining),
-        "last_watering": summarize_state(last),
-        "zones": zones,
-        "telemetry": {
-            "live_running_state_available": True,
-            "physical_state_verified": bool(
-                status_attributes.get("physical_state_verified", False)
+    active_attributes = dict(active.get("attributes") or {})
+    active_number = _as_int(
+        _first(active_attributes, "zone_number", "active_zone_number")
+    )
+    if active_number is None:
+        active_number = _as_int(active.get("state"))
+    remaining_attributes = dict(remaining.get("attributes") or {})
+    remaining_seconds = _as_int(
+        _first(remaining_attributes, "remaining_seconds", "duration_seconds")
+    )
+    if remaining_seconds is None:
+        remaining_seconds = _as_int(remaining.get("state"))
+        unit = str(remaining_attributes.get("unit_of_measurement") or "").lower()
+        if remaining_seconds is not None and unit in {"min", "minute", "minutes"}:
+            remaining_seconds *= 60
+    # No audited Wyze signal proves physical valve position, regardless of an
+    # untrusted entity attribute carrying a truthy value.
+    physical = False
+    raw_controller_evidence = _first(
+        status_attributes, "watering_evidence_type", "evidence_type"
+    )
+    controller_state_value, controller_state_known = _watering_state_value(
+        status.get("state")
+    )
+    controller_supported = (
+        controller_state_known
+        and
+        str(raw_controller_evidence or "").lower() != "unsupported"
+    )
+    controller_evidence = (
+        _state_evidence(
+            raw_controller_evidence, default="controller-reported"
+        )
+        if controller_supported
+        else None
+    )
+    active_evidence = _state_evidence(
+        active_attributes.get("evidence_type"),
+        default=controller_evidence or "inferred",
+    )
+    remaining_evidence = _state_evidence(
+        remaining_attributes.get("evidence_type"),
+        default=(
+            "inferred"
+            if remaining_seconds is not None
+            else controller_evidence or "inferred"
+        ),
+    )
+    return SprinklerSummary(
+        controller=_entity_state_summary(status),
+        active_zone=_entity_state_summary(active),
+        remaining=_entity_state_summary(remaining),
+        last_watering=_entity_state_summary(last),
+        zones=[_zone_model(item) for item in zones],
+        controller_state=ControllerState(
+            state=controller_state_value,
+            state_supported=controller_supported,
+            evidence=controller_evidence,
+            observed_at=timestamp_to_iso(
+                status_attributes.get("observed_at") or status.get("last_updated")
             ),
-            "source": status_attributes.get("source"),
-            "observed_at": status_attributes.get("observed_at"),
-            "partial_update": bool(status_attributes.get("partial_update", False)),
-            "endpoint_errors": status_attributes.get("endpoint_errors") or [],
-            "note": (
-                "State is read from Wyze cloud controller telemetry and does not prove "
-                "physical water flow."
+            connected=status_attributes.get("connected"),
+            active_zone_id=(
+                normalized_zone_id(active_number) if active_number is not None else None
             ),
-        },
-    }
+            active_native_zone_id=(
+                str(_first(active_attributes, "native_zone_id", "zone_id"))
+                if _first(active_attributes, "native_zone_id", "zone_id") is not None
+                else None
+            ),
+            active_zone_name=_first(active_attributes, "zone_name", "name"),
+            active_zone_evidence=active_evidence,
+            remaining_runtime_seconds=remaining_seconds,
+            remaining_runtime_evidence=(
+                remaining_evidence if remaining_seconds is not None else None
+            ),
+            expected_end_at=timestamp_to_iso(
+                _first(status_attributes, "expected_end_at", "expected_end")
+            ),
+            expected_end_evidence=(
+                _state_evidence(
+                    status_attributes.get("expected_end_evidence_type"),
+                    default=remaining_evidence or controller_evidence or "inferred",
+                )
+                if _first(status_attributes, "expected_end_at", "expected_end")
+                is not None
+                else None
+            ),
+            physical_state_verified=physical,
+        ),
+        telemetry=TelemetryProvenance(
+            live_running_state_available=controller_supported,
+            physical_state_verified=physical,
+            source=status_attributes.get("source"),
+            observed_at=timestamp_to_iso(status_attributes.get("observed_at")),
+            partial_update=bool(status_attributes.get("partial_update", False)),
+            endpoint_errors=[
+                str(item) for item in status_attributes.get("endpoint_errors") or []
+            ],
+            note=(
+                "State is controller-reported through Wyze cloud and does not prove "
+                "physical valve position or water flow."
+            ),
+        ),
+    )
 
 
 @mcp.tool(title="List sprinkler zones", annotations=READ)
-async def list_sprinkler_zones() -> dict[str, Any]:
+async def list_sprinkler_zones() -> SprinklerZoneList:
     """List exact sprinkler zones, enabled state, durations, and soil metadata."""
     zones = await _sprinkler_zone_records()
     _audit_tool("list_sprinkler_zones", count=len(zones))
-    return {"count": len(zones), "zones": zones}
+    return SprinklerZoneList(
+        count=len(zones), zones=[_zone_model(item) for item in zones]
+    )
 
 
 @mcp.tool(title="Get sprinkler configuration", annotations=READ)
-async def get_sprinkler_configuration() -> dict[str, Any]:
+async def get_sprinkler_configuration() -> SprinklerConfiguration:
     """Read controller wiring, sensors, notifications, schedules, and skip settings."""
     state = await ha.state(SPRINKLER_CONFIGURATION)
     _audit_tool("get_sprinkler_configuration")
-    return summarize_state(state)
+    summary = summarize_state(state)
+    return SprinklerConfiguration(
+        entity_id=str(summary.get("entity_id") or SPRINKLER_CONFIGURATION),
+        state=str(summary.get("state") or "unknown"),
+        last_changed=timestamp_to_iso(summary.get("last_changed")),
+        last_updated=timestamp_to_iso(summary.get("last_updated")),
+        values=_configuration_values(dict(summary.get("attributes") or {})),
+    )
+
+
+def _provider_items(payload: dict[str, Any], *keys: str) -> list[dict[str, Any]]:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _zone_number(value: dict[str, Any]) -> int | None:
+    zone = _as_int(_first(value, "zone_number", "zone", "number"))
+    if zone is not None and 1 <= zone <= 8:
+        return zone
+    zone_id = value.get("zone_id")
+    if isinstance(zone_id, str) and re.fullmatch(r"zone-[1-8]", zone_id):
+        return zone_number_from_id(zone_id)
+    return None
+
+
+def _has_ambiguous_timestamp(value: dict[str, Any]) -> bool:
+    ambiguity = value.get("timestamp_ambiguity")
+    if isinstance(ambiguity, dict) and ambiguity.get("supported") is False:
+        return True
+    for key in (
+        "started_at",
+        "start_time_utc",
+        "start_ts",
+        "start_time",
+        "ended_at",
+        "end_time_utc",
+        "end_ts",
+        "complete_time",
+    ):
+        raw = value.get(key)
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        try:
+            parsed = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if parsed.tzinfo is None:
+            return True
+    return False
+
+
+def _ambiguous_interval_count(runs: list[dict[str, Any]]) -> int:
+    count = 0
+    for run in runs:
+        zone_runs = _provider_items(run, "zone_runs", "zones")
+        if not zone_runs and _zone_number(run) is not None:
+            zone_runs = [run]
+        single_zone_run = len(zone_runs) == 1
+        run_started = timestamp_to_iso(
+            _first(
+                run,
+                "started_at",
+                "start_time_utc",
+                "start_ts",
+                "start_time",
+                "start_date",
+            )
+        )
+        for zone_run in zone_runs:
+            zone_started = timestamp_to_iso(
+                _first(
+                    zone_run,
+                    "started_at",
+                    "start_time_utc",
+                    "start_ts",
+                    "start_time",
+                )
+            )
+            effective_started = zone_started or (
+                run_started if single_zone_run else None
+            )
+            if effective_started is not None:
+                continue
+            if _has_ambiguous_timestamp(zone_run) or (
+                single_zone_run and _has_ambiguous_timestamp(run)
+            ):
+                count += 1
+    return count
+
+
+def _run_intervals(
+    runs: list[dict[str, Any]],
+    *,
+    window_start: datetime,
+    window_end: datetime,
+    evidence_type: Literal["controller-reported", "reconstructed"],
+    zone_names: dict[int, str],
+) -> list[SprinklerHistoryInterval]:
+    intervals: list[SprinklerHistoryInterval] = []
+    for run in runs:
+        run_started = timestamp_to_iso(
+            _first(
+                run,
+                "started_at",
+                "start_time_utc",
+                "start_ts",
+                "start_time",
+                "start_date",
+            )
+        )
+        run_ended = timestamp_to_iso(
+            _first(run, "ended_at", "end_time_utc", "end_ts", "complete_time")
+        )
+        zone_runs = _provider_items(run, "zone_runs", "zones")
+        if not zone_runs and _zone_number(run) is not None:
+            zone_runs = [run]
+        single_zone_run = len(zone_runs) == 1
+        for zone_run in zone_runs:
+            zone_number = _zone_number(zone_run) or _zone_number(run)
+            if zone_number is None:
+                continue
+            interval_evidence: Literal["controller-reported", "reconstructed"] = (
+                "reconstructed"
+                if evidence_type == "reconstructed"
+                or str(zone_run.get("evidence_type") or "").lower()
+                == "reconstructed"
+                else "controller-reported"
+            )
+            zone_started_raw = _first(
+                zone_run,
+                "started_at",
+                "start_time_utc",
+                "start_ts",
+                "start_time",
+            )
+            zone_ended_raw = _first(
+                zone_run,
+                "ended_at",
+                "end_time_utc",
+                "end_ts",
+                "complete_time",
+            )
+            started_at = timestamp_to_iso(zone_started_raw) or (
+                run_started if single_zone_run else None
+            )
+            ended_at = timestamp_to_iso(zone_ended_raw) or (
+                run_ended if single_zone_run else None
+            )
+            if started_at is None:
+                continue
+            if zone_started_raw is None or (
+                zone_ended_raw is None and ended_at is not None
+            ):
+                interval_evidence = "reconstructed"
+            start_dt = parse_rfc3339(started_at, "sprinkler interval start")
+            end_dt = (
+                parse_rfc3339(ended_at, "sprinkler interval end")
+                if ended_at is not None
+                else None
+            )
+            commanded = _as_int(
+                _first(
+                    zone_run,
+                    "commanded_duration_seconds",
+                    "requested_duration_seconds",
+                    "planned_duration_seconds",
+                )
+            )
+            raw_duration_evidence = str(
+                zone_run.get("duration_evidence_type") or ""
+            ).lower()
+            actual_duration = _as_int(
+                _first(zone_run, "duration_seconds", "actual_duration_seconds")
+            )
+            synthetic_command_end = (
+                actual_duration is None
+                and commanded is not None
+                and raw_duration_evidence == "unsupported"
+                and str(zone_run.get("evidence_type") or "").lower()
+                == "reconstructed"
+            )
+            if synthetic_command_end:
+                ended_at = None
+                end_dt = None
+            if end_dt is not None and end_dt < start_dt:
+                continue
+            if start_dt > window_end or (end_dt is not None and end_dt < window_start):
+                continue
+            duration = actual_duration
+            duration_supported = duration is not None
+            duration_evidence = (
+                _state_evidence(
+                    zone_run.get("duration_evidence_type"),
+                    default="controller-reported",
+                )
+                if duration_supported
+                else None
+            )
+            if duration is None and end_dt is not None:
+                duration = max(0, round((end_dt - start_dt).total_seconds()))
+                duration_supported = True
+                duration_evidence = "calculated"
+            commanded_evidence = (
+                _state_evidence(
+                    zone_run.get("commanded_duration_evidence_type")
+                    or run.get("commanded_duration_evidence_type"),
+                    default="controller-reported",
+                )
+                if commanded is not None
+                else None
+            )
+            source_value = _first(
+                zone_run, "source", "run_source", "trigger_type"
+            ) or _first(run, "source", "run_source", "trigger_type")
+            source_supported = source_value is not None
+            source_evidence = (
+                _state_evidence(
+                    zone_run.get("source_evidence_type")
+                    or run.get("source_evidence_type"),
+                    default="controller-reported",
+                )
+                if source_supported
+                else None
+            )
+            explicit_outcome = _first(zone_run, "outcome", "state", "status") or _first(
+                run, "outcome", "state", "status"
+            )
+            outcome = str(explicit_outcome or "unknown").lower()
+            outcome_supported = explicit_outcome is not None
+            outcome_evidence = _state_evidence(
+                zone_run.get("outcome_evidence_type")
+                or run.get("outcome_evidence_type"),
+                default=(
+                    "controller-reported" if explicit_outcome is not None else "inferred"
+                ),
+            ) if outcome_supported else None
+            skip_state = _first(zone_run, "skip_state", "skipped")
+            parsed_skip = _as_bool(skip_state)
+            if parsed_skip is True:
+                outcome = "skipped"
+                outcome_supported = True
+                outcome_evidence = "controller-reported"
+            elif (
+                parsed_skip is None
+                and skip_state is not None
+                and str(skip_state).lower() != "not_skipped"
+            ):
+                outcome = str(skip_state).strip().lower()
+                outcome_supported = True
+                outcome_evidence = "controller-reported"
+            interrupted_value = _first(zone_run, "interrupted", "interruption_status")
+            if interrupted_value is None:
+                interrupted_value = _first(run, "interrupted", "interruption_status")
+            parsed_interrupted = _as_bool(interrupted_value)
+            interrupted = parsed_interrupted
+            interruption_supported = parsed_interrupted is not None
+            if interrupted is None and outcome in {
+                "aborted",
+                "cancelled",
+                "canceled",
+                "interrupted",
+                "stopped",
+            }:
+                interrupted = True
+                interruption_supported = True
+            interruption_evidence = (
+                _state_evidence(
+                    zone_run.get("interruption_evidence_type")
+                    or run.get("interruption_evidence_type"),
+                    default=(
+                        "controller-reported"
+                        if parsed_interrupted is not None
+                        else "inferred"
+                    ),
+                )
+                if interruption_supported
+                else None
+            )
+            native_id = _first(zone_run, "native_zone_id", "zone_id", "id")
+            if native_id == normalized_zone_id(zone_number):
+                native_id = None
+            run_id_value = _first(
+                zone_run, "run_id", "schedule_run_id"
+            ) or _first(run, "run_id", "schedule_run_id", "id")
+            program_id_value = _first(run, "program_id", "schedule_id")
+            zone_name = str(
+                _first(zone_run, "zone_name", "name")
+                or zone_names.get(zone_number)
+                or f"Zone {zone_number}"
+            )
+            intervals.append(
+                SprinklerHistoryInterval(
+                    zone_id=normalized_zone_id(zone_number),
+                    zone_name=zone_name,
+                    native_zone_id=str(native_id) if native_id is not None else None,
+                    started_at=started_at,
+                    ended_at=ended_at,
+                    duration_seconds=duration,
+                    duration_supported=duration_supported,
+                    duration_evidence=duration_evidence,
+                    commanded_duration_seconds=commanded,
+                    commanded_duration_evidence=commanded_evidence,
+                    source=str(source_value or "unknown"),
+                    source_supported=source_supported,
+                    source_evidence=source_evidence,
+                    outcome=outcome,
+                    outcome_supported=outcome_supported,
+                    outcome_evidence=outcome_evidence,
+                    interrupted=interrupted,
+                    interruption_supported=interruption_supported,
+                    interruption_evidence=interruption_evidence,
+                    run_id=str(run_id_value) if run_id_value is not None else None,
+                    program_id=(
+                        str(program_id_value) if program_id_value is not None else None
+                    ),
+                    evidence_type=interval_evidence,
+                )
+            )
+    return intervals
+
+
+def _same_history_interval(
+    left: SprinklerHistoryInterval, right: SprinklerHistoryInterval
+) -> bool:
+    if left.zone_id != right.zone_id:
+        return False
+    if abs((left.started_at - right.started_at).total_seconds()) > 2:
+        return False
+    return True
+
+
+def _dedupe_history_intervals(
+    items: list[SprinklerHistoryInterval],
+) -> list[SprinklerHistoryInterval]:
+    deduped: list[SprinklerHistoryInterval] = []
+    for item in items:
+        match = next(
+            (index for index, current in enumerate(deduped) if _same_history_interval(current, item)),
+            None,
+        )
+        if match is None:
+            deduped.append(item)
+        elif (
+            item.evidence_type == "controller-reported",
+            item.ended_at is not None,
+        ) > (
+            deduped[match].evidence_type == "controller-reported",
+            deduped[match].ended_at is not None,
+        ):
+            deduped[match] = item
+    return deduped
 
 
 @mcp.tool(title="Get sprinkler watering history", annotations=READ)
 async def get_sprinkler_history(
-    limit: Annotated[int, Field(ge=1, le=10)] = 10,
-) -> dict[str, Any]:
-    """Read the bounded recent and upcoming controller schedule-run history."""
-    state = await ha.state(SPRINKLER_LAST_WATERING)
-    runs = list((state.get("attributes") or {}).get("recent_runs") or [])[:limit]
-    _audit_tool("get_sprinkler_history", count=len(runs))
-    return {
-        "last_watering": state.get("state"),
-        "count": len(runs),
-        "runs": runs,
-        "last_updated": state.get("last_updated"),
+    limit: Annotated[int, Field(ge=1, le=100)] = 100,
+    hours: Annotated[int, Field(ge=1, le=744)] = 48,
+) -> SprinklerHistory:
+    """Return one interval per zone for a rolling, default 48-hour Gantt window."""
+    window_end = datetime.now(UTC)
+    window_start = window_end - timedelta(hours=hours)
+    zone_records = await _sprinkler_zone_records()
+    zone_names = {
+        int(item["zone"]): str(item.get("name") or f"Zone {item['zone']}")
+        for item in zone_records
     }
+    provider_runs: list[dict[str, Any]] = []
+    try:
+        provider = await _sprinkler_response(
+            "get_sprinkler_schedule_runs", {"limit": limit}
+        )
+        provider_runs = _provider_items(provider, "runs", "schedules")
+    except HomeAssistantError:
+        provider_runs = []
+    native_intervals = _run_intervals(
+        provider_runs,
+        window_start=window_start,
+        window_end=window_end,
+        evidence_type="controller-reported",
+        zone_names=zone_names,
+    )
+    intervals = _dedupe_history_intervals(native_intervals)
+
+    recorder_runs: list[dict[str, Any]] = []
+    recorder_snapshot_count = 0
+    try:
+        histories = await ha.history(
+            [SPRINKLER_LAST_WATERING],
+            window_start.isoformat(),
+            window_end.isoformat(),
+            False,
+        )
+        groups = histories if isinstance(histories, list) else []
+        for group in groups:
+            states = group if isinstance(group, list) else [group]
+            for state in states:
+                if not isinstance(state, dict):
+                    continue
+                recorder_snapshot_count += 1
+                attributes = state.get("attributes") or {}
+                recorder_runs.extend(
+                    item
+                    for item in attributes.get("recent_runs") or []
+                    if isinstance(item, dict)
+                )
+    except HomeAssistantError:
+        recorder_runs = []
+    recorder_intervals = _run_intervals(
+        recorder_runs,
+        window_start=window_start,
+        window_end=window_end,
+        evidence_type="reconstructed",
+        zone_names=zone_names,
+    )
+    reconstructed = _dedupe_history_intervals(recorder_intervals)
+    intervals.extend(
+        item
+        for item in reconstructed
+        if not any(_same_history_interval(current, item) for current in intervals)
+    )
+    intervals.sort(key=lambda item: (item.started_at, item.zone_id))
+    omitted_ambiguous_timestamp_count = _ambiguous_interval_count(
+        provider_runs
+    ) + _ambiguous_interval_count(recorder_runs)
+    _audit_tool(
+        "get_sprinkler_history", count=len(intervals), hours=hours, provider_limit=limit
+    )
+    return SprinklerHistory(
+        window_started_at=window_start.isoformat(),
+        window_ended_at=window_end.isoformat(),
+        count=len(intervals),
+        intervals=intervals,
+        native_limit=limit,
+        native_run_count=len(provider_runs),
+        native_interval_count=len(native_intervals),
+        recorder_snapshot_count=recorder_snapshot_count,
+        recorder_interval_count=len(recorder_intervals),
+        deduplicated_interval_count=max(
+            0, len(native_intervals) + len(recorder_intervals) - len(intervals)
+        ),
+        omitted_ambiguous_timestamp_count=omitted_ambiguous_timestamp_count,
+        upstream_complete=False,
+        limitation=(
+            "Wyze exposes only a limit-bounded schedule_runs response with no cursor or "
+            "lifetime-history pagination; recorder snapshots are unioned for this window. "
+            f"Timezone-ambiguous per-zone intervals omitted: {omitted_ambiguous_timestamp_count}."
+        ),
+    )
+
+
+def _unsupported(reason: str, evidence: str) -> UnsupportedSignal:
+    return UnsupportedSignal(reason=reason, upstream_evidence=evidence)
+
+
+def _controller_from_snapshot(snapshot: dict[str, Any]) -> ControllerState:
+    watering_state = snapshot.get("watering_state")
+    if isinstance(watering_state, dict):
+        state, state_known = _watering_state_value(watering_state.get("state"))
+        raw_state_evidence = watering_state.get("evidence_type")
+        state_supported = (
+            state_known
+            and str(raw_state_evidence or "").lower() != "unsupported"
+        )
+        state_evidence = (
+            _state_evidence(raw_state_evidence, default="controller-reported")
+            if state_supported
+            else None
+        )
+        observed_at = timestamp_to_iso(
+            watering_state.get("observed_at") or snapshot.get("updated_at")
+        )
+    else:
+        state, state_known = _watering_state_value(
+            _first(snapshot, "watering", "watering_state", "state")
+        )
+        observed_at = timestamp_to_iso(snapshot.get("updated_at"))
+        raw_state_evidence = snapshot.get("watering_state_evidence_type")
+        state_supported = (
+            state_known
+            and str(raw_state_evidence or "").lower() != "unsupported"
+        )
+        state_evidence = (
+            _state_evidence(raw_state_evidence, default="controller-reported")
+            if state_supported
+            else None
+        )
+    zone = _as_int(_first(snapshot, "active_zone_number", "zone_number"))
+    remaining_seconds = _as_int(
+        _first(snapshot, "remaining_seconds", "remaining_runtime_seconds")
+    )
+    remaining_evidence = (
+        _state_evidence(
+            snapshot.get("remaining_evidence_type"), default="inferred"
+        )
+        if remaining_seconds is not None
+        else None
+    )
+    active_native_zone_id = _first(
+        snapshot, "active_native_zone_id", "active_zone_id"
+    )
+    if zone is not None and active_native_zone_id == normalized_zone_id(zone):
+        active_native_zone_id = None
+    if zone is not None:
+        for item in snapshot.get("zones") or []:
+            if isinstance(item, dict) and _zone_number(item) == zone:
+                native = _first(item, "native_zone_id", "zone_id", "id")
+                if (
+                    active_native_zone_id is None
+                    and native is not None
+                    and native != normalized_zone_id(zone)
+                ):
+                    active_native_zone_id = str(native)
+                break
+    expected_end = timestamp_to_iso(
+        _first(snapshot, "expected_end", "expected_end_at")
+    )
+    expected_end_evidence = (
+        _state_evidence(
+            snapshot.get("expected_end_evidence_type"),
+            default=remaining_evidence or state_evidence or "inferred",
+        )
+        if expected_end is not None
+        else None
+    )
+    return ControllerState(
+        state=state,
+        state_supported=state_supported,
+        evidence=state_evidence,
+        observed_at=observed_at,
+        connected=snapshot.get("connected"),
+        active_zone_id=normalized_zone_id(zone) if zone is not None else None,
+        active_native_zone_id=(
+            str(active_native_zone_id) if active_native_zone_id is not None else None
+        ),
+        active_zone_name=_first(snapshot, "active_zone_name", "zone_name"),
+        active_zone_evidence=(
+            state_evidence or "inferred" if zone is not None else None
+        ),
+        remaining_runtime_seconds=remaining_seconds,
+        remaining_runtime_evidence=remaining_evidence,
+        expected_end_at=expected_end,
+        expected_end_evidence=expected_end_evidence,
+        physical_state_verified=False,
+    )
+
+
+def _command_observation(value: dict[str, Any]) -> CommandObservation | None:
+    if not value:
+        return None
+    status = str(value.get("state") or "unknown")
+    zones = []
+    raw_zones = value.get("zones")
+    if not isinstance(raw_zones, list):
+        raw_zones = [value] if _zone_number(value) is not None else []
+    for raw_zone in raw_zones:
+        if not isinstance(raw_zone, dict):
+            continue
+        zone_number = _zone_number(raw_zone)
+        if zone_number is None:
+            continue
+        native_id = _first(raw_zone, "native_zone_id", "zone_id", "id")
+        if native_id == normalized_zone_id(zone_number):
+            native_id = None
+        zones.append(
+            {
+                "zone_id": normalized_zone_id(zone_number),
+                "native_zone_id": str(native_id) if native_id is not None else None,
+                "duration_seconds": _as_int(
+                    _first(
+                        raw_zone,
+                        "duration_seconds",
+                        "duration",
+                        "requested_duration_seconds",
+                    )
+                ),
+            }
+        )
+    first_zone = zones[0] if len(zones) == 1 else None
+    return CommandObservation(
+        command_id=str(value["command_id"]) if value.get("command_id") else None,
+        action=(
+            str(_first(value, "action", "operation"))
+            if _first(value, "action", "operation") is not None
+            else None
+        ),
+        zone_id=first_zone["zone_id"] if first_zone else None,
+        requested_duration_seconds=(
+            first_zone["duration_seconds"] if first_zone else None
+        ),
+        zones=zones,
+        observed_at=timestamp_to_iso(
+            _first(value, "issued_at", "observed_at", "created_at")
+        ),
+        expires_at=timestamp_to_iso(value.get("expires_at")),
+        evidence=_state_evidence(value.get("evidence_type"), default="commanded"),
+        status=status,
+        physical_state_verified=False,
+    )
+
+
+@mcp.tool(title="Get sprinkler capabilities", annotations=READ)
+async def get_sprinkler_capabilities() -> SprinklerCapabilities:
+    """List supported and explicitly unsupported upstream sprinkler signals."""
+    device_id = await _sprinkler_device_id()
+    zones = [_zone_model(item) for item in await _sprinkler_zone_records()]
+    items = [
+        CapabilityItem(
+            capability="watering_history",
+            supported=True,
+            operations=["read"],
+            evidence="controller-reported",
+            semantics="Limit-bounded Wyze schedule runs unioned with Home Assistant recorder snapshots.",
+            upstream_source="Wyze private irrigation schedule_runs endpoint",
+        ),
+        CapabilityItem(
+            capability="full_lifetime_history",
+            supported=False,
+            semantics="An unbounded account-lifetime history cannot be retrieved.",
+            upstream_source="Wyze private irrigation schedule_runs endpoint",
+            limitation="The endpoint accepts only a limit and exposes no cursor or pagination contract.",
+        ),
+        CapabilityItem(
+            capability="per_zone_run_intervals",
+            supported=True,
+            operations=["read"],
+            evidence="controller-reported",
+            semantics="One normalized interval per zone; interruption is explicit when supplied and otherwise outcome-derived.",
+            upstream_source="Wyze schedule_runs zone_runs",
+        ),
+        CapabilityItem(
+            capability="controller_watering_state",
+            supported=True,
+            operations=["read"],
+            evidence="controller-reported",
+            semantics="Cloud/controller state, active zone, and remaining runtime; never physical valve feedback.",
+            upstream_source="Wyze get_iot_prop and schedule state",
+        ),
+        CapabilityItem(
+            capability="exact_zone_run",
+            supported=True,
+            operations=["command"],
+            evidence="commanded",
+            semantics="One enabled zone for an integer 60 through 10800 seconds after explicit confirmation.",
+            upstream_source="Wyze irrigation quickrun",
+        ),
+        CapabilityItem(
+            capability="multi_zone_quick_run",
+            supported=True,
+            operations=["command"],
+            evidence="commanded",
+            semantics="Ordered unique enabled zones, each with exact seconds, total at most 10800 seconds.",
+            upstream_source="Wyze irrigation quickrun zone_runs",
+        ),
+        CapabilityItem(
+            capability="stop_watering",
+            supported=True,
+            operations=["command"],
+            evidence="commanded",
+            semantics="Idempotent controller stop request.",
+            upstream_source="Wyze irrigation runningschedule STOP",
+        ),
+        CapabilityItem(
+            capability="native_schedule_definitions",
+            supported=True,
+            operations=["read"],
+            evidence="controller-reported",
+            semantics="Read-only native definitions with identifiers and zone durations.",
+            upstream_source="Wyze private irrigation schedule GET",
+        ),
+        CapabilityItem(
+            capability="cycle_soak_and_recurrence",
+            supported=True,
+            operations=["read"],
+            evidence="controller-reported",
+            semantics="Allowlisted recurrence and cycle/soak fields when present in a native definition.",
+            upstream_source="Wyze private irrigation schedule GET",
+        ),
+        CapabilityItem(
+            capability="schedule_mutations",
+            supported=False,
+            semantics="Create, update, delete, enable, disable, and manual-run are not exposed without verified request semantics.",
+            upstream_source="Wyze private irrigation schedule endpoint",
+            limitation="No official API or captured, validated mutation schema is available.",
+        ),
+        CapabilityItem(
+            capability="native_program_manual_run",
+            supported=False,
+            semantics="Native fixed or smart programs cannot be manually launched through a verified API request.",
+            upstream_source="Wyze private irrigation API audit",
+            limitation="Quick Run is verified; native program-run request semantics are not.",
+        ),
+        CapabilityItem(
+            capability="manual_skip_command",
+            supported=False,
+            semantics="No verified request exists to mark a native scheduled run manually skipped.",
+            upstream_source="Wyze private irrigation API audit",
+            limitation="Observed skip fields report outcomes only; they do not define a safe command contract.",
+        ),
+        CapabilityItem(
+            capability="upcoming_runs",
+            supported=False,
+            semantics="Opportunistic future records are returned only when Wyze explicitly includes next_run_at; this is not a complete upcoming-run feed.",
+            upstream_source="Wyze schedule and schedule_runs",
+            limitation="The audited private endpoints provide no guaranteed or complete upcoming-runs contract.",
+        ),
+        CapabilityItem(
+            capability="weather_skip_decisions",
+            supported=True,
+            operations=["read"],
+            evidence="controller-reported",
+            semantics="Configured thresholds and retained skip decisions/reasons.",
+            upstream_source="Wyze device_info and schedule_runs",
+        ),
+        CapabilityItem(
+            capability="raw_wyze_weather",
+            supported=False,
+            semantics="No raw weather-observation payload is exposed.",
+            upstream_source="Installed wyzeapy and observed integration payloads",
+            limitation="Only skip thresholds and decisions are present.",
+        ),
+        CapabilityItem(
+            capability="sprinkler_plus_internal_decision_model",
+            supported=False,
+            semantics="Wyze's internal water-balance calculation is not exposed.",
+            upstream_source="Wyze support documentation and private payload audit",
+            limitation="Modeled moisture and outcomes are available, not the full decision inputs/calculation.",
+        ),
+        CapabilityItem(
+            capability="zone_moisture_estimate",
+            supported=True,
+            operations=["read"],
+            evidence="calculated",
+            semantics="Wyze modeled soil-moisture native value with upstream-unspecified unit, never a physical measurement.",
+            upstream_source="Wyze zone payload",
+        ),
+        CapabilityItem(
+            capability="advanced_zone_configuration",
+            supported=True,
+            operations=["read"],
+            evidence="controller-reported",
+            semantics="Soil, vegetation, exposure, slope, nozzle, area, flow configuration, depletion, root and efficiency parameters when present.",
+            upstream_source="Wyze zone payload",
+        ),
+        CapabilityItem(
+            capability="controller_diagnostics",
+            supported=True,
+            operations=["read"],
+            evidence="controller-reported",
+            semantics="Connectivity, firmware, native signal-strength value and endpoint health; signal units are upstream-unspecified and network identifiers remain redacted.",
+            upstream_source="Wyze get_iot_prop and Home Assistant device registry",
+        ),
+        CapabilityItem(
+            capability="physical_valve_flow_electrical_fault_feedback",
+            supported=False,
+            semantics="No physical-open, measured-flow, electrical-load/current, or valve-fault telemetry is available.",
+            upstream_source="Installed integration/library and captured payload audit",
+            limitation="Wiring and configured flow rate are configuration, not measured feedback.",
+        ),
+        CapabilityItem(
+            capability="live_wired_sensor_state",
+            supported=False,
+            semantics="Wiring metadata does not expose a live rain/flow sensor input state.",
+            upstream_source="Installed integration/library and captured payload audit",
+            limitation="Only wiring configuration was observed; no live physical input signal was present.",
+        ),
+    ]
+    _audit_tool("get_sprinkler_capabilities", count=len(items))
+    return SprinklerCapabilities(
+        controller_id=device_id,
+        zones=[item.zone_id for item in zones],
+        capabilities=items,
+    )
+
+
+@mcp.tool(title="Get sprinkler command and controller status", annotations=READ)
+async def get_sprinkler_command_status() -> SprinklerCommandStatus:
+    """Separate commanded state from controller-reported watering state."""
+    try:
+        payload = await _sprinkler_response("get_sprinkler_snapshot")
+        snapshot = (
+            payload.get("snapshot")
+            if isinstance(payload.get("snapshot"), dict)
+            else payload
+        )
+    except HomeAssistantError:
+        summary = await get_sprinkler_summary()
+        snapshot = {}
+        controller = summary.controller_state
+    else:
+        controller = _controller_from_snapshot(snapshot)
+    pending_raw = snapshot.get("command_pending")
+    command_status_raw = snapshot.get("command_status")
+    integration_status = (
+        _command_observation(command_status_raw)
+        if isinstance(command_status_raw, dict)
+        else None
+    )
+    pending = (
+        integration_status
+        if pending_raw is True
+        or (integration_status is not None and integration_status.status == "pending")
+        else None
+    )
+    if pending is None and pending_raw is True:
+        pending = CommandObservation(evidence="commanded", status="pending")
+    audit_entry = audit.latest_tool_call(
+        {
+            "run_sprinkler_zone",
+            "run_sprinkler_sequence",
+            "run_sprinkler_zone_exact",
+            "run_sprinkler_sequence_exact",
+            "stop_sprinklers",
+        }
+    )
+    last_command = None
+    if audit_entry:
+        zone = _as_int(audit_entry.get("zone"))
+        audit_zones: list[dict[str, Any]] = []
+        for item in audit_entry.get("zones") or []:
+            if not isinstance(item, dict) or _zone_number(item) is None:
+                continue
+            number = _zone_number(item)
+            audit_zones.append(
+                {
+                    "zone_id": normalized_zone_id(number),
+                    "native_zone_id": item.get("native_zone_id"),
+                    "duration_seconds": _as_int(item.get("duration_seconds")),
+                }
+            )
+        if not audit_zones and zone is not None:
+            audit_zones.append(
+                {
+                    "zone_id": normalized_zone_id(zone),
+                    "native_zone_id": audit_entry.get("native_zone_id"),
+                    "duration_seconds": _as_int(
+                        _first(
+                            audit_entry,
+                            "duration_seconds",
+                            "requested_duration_seconds",
+                        )
+                    ),
+                }
+            )
+        first_audit_zone = audit_zones[0] if len(audit_zones) == 1 else None
+        last_command = CommandObservation(
+            command_id=audit_entry.get("command_id"),
+            action=audit_entry.get("operation") or audit_entry.get("tool"),
+            zone_id=(
+                first_audit_zone["zone_id"]
+                if first_audit_zone is not None
+                else None
+            ),
+            requested_duration_seconds=_as_int(
+                first_audit_zone.get("duration_seconds")
+                if first_audit_zone is not None
+                else None
+            ),
+            zones=audit_zones,
+            observed_at=timestamp_to_iso(audit_entry.get("timestamp")),
+            evidence="commanded",
+            status="submitted",
+        )
+    _audit_tool("get_sprinkler_command_status")
+    return SprinklerCommandStatus(
+        pending_command=pending,
+        integration_command_status=integration_status,
+        last_mcp_command=last_command,
+        controller_state=controller,
+        note="Command records prove submission only; controller state remains separate and neither proves physical valve position or flow.",
+    )
+
+
+@mcp.tool(title="List native sprinkler schedules", annotations=READ)
+async def list_sprinkler_schedules() -> SprinklerScheduleList:
+    """Read native schedule definitions without offering unverified mutations."""
+    read_supported = True
+    try:
+        payload = await _sprinkler_response("get_sprinkler_schedules")
+        raw_schedules = _provider_items(payload, "schedules")
+    except HomeAssistantError:
+        read_supported = False
+        raw_schedules = []
+    schedules: list[NativeSchedule] = []
+    for item in raw_schedules:
+        schedule_id_value = _first(item, "schedule_id", "id")
+        if schedule_id_value is None:
+            continue
+        schedule_id = str(schedule_id_value)
+        schedule_zones: list[NativeScheduleZone] = []
+        for zone in _provider_items(item, "zone_runs", "zones"):
+            number = _zone_number(zone)
+            if number is not None:
+                native_id = _first(zone, "native_zone_id", "zone_id", "id")
+                if native_id == normalized_zone_id(number):
+                    native_id = None
+                schedule_zones.append(
+                    NativeScheduleZone(
+                        zone_id=normalized_zone_id(number),
+                        zone_number=number,
+                        native_zone_id=(
+                            str(native_id) if native_id is not None else None
+                        ),
+                        zone_name=_first(zone, "zone_name", "name"),
+                        duration_seconds=_as_int(zone.get("duration_seconds")),
+                        enabled=_as_bool(zone.get("enabled")),
+                    )
+                )
+        days = item.get("days") or item.get("run_days") or []
+        cycle_raw = item.get("cycle_soak")
+        cycle_soak = None
+        if isinstance(cycle_raw, dict):
+            cycle_soak = CycleSoak(
+                enabled=_as_bool(cycle_raw.get("enabled")),
+                cycle_count=_as_int(cycle_raw.get("cycle_count")),
+                cycle_duration_seconds=_as_int(
+                    cycle_raw.get("cycle_duration_seconds")
+                ),
+                soak_duration_seconds=_as_int(
+                    cycle_raw.get("soak_duration_seconds")
+                ),
+            )
+        ambiguity_raw = item.get("timestamp_ambiguity")
+        ambiguity = None
+        if isinstance(ambiguity_raw, dict):
+            fields = ambiguity_raw.get("fields") or []
+            ambiguity = _unsupported(
+                str(
+                    ambiguity_raw.get("reason")
+                    or "Schedule timestamps lack an explicit UTC offset."
+                ),
+                "Ambiguous fields: " + ", ".join(str(value) for value in fields),
+            )
+        schedules.append(
+            NativeSchedule(
+                schedule_id=schedule_id,
+                name=item.get("name"),
+                schedule_type=_first(item, "schedule_type", "type"),
+                enabled=item.get("enabled"),
+                state=item.get("state"),
+                start_time=item.get("start_time"),
+                start_date=timestamp_to_iso(item.get("start_date")),
+                end_date=timestamp_to_iso(item.get("end_date")),
+                next_run_at=timestamp_to_iso(item.get("next_run_at")),
+                interval=item.get("interval"),
+                recurrence=item.get("recurrence"),
+                repeat_interval=_as_int(item.get("repeat_interval")),
+                odd_even=item.get("odd_even"),
+                run_days=[str(value) for value in days]
+                if isinstance(days, list)
+                else [],
+                zone_ids=[zone.zone_id for zone in schedule_zones],
+                zone_runs=schedule_zones,
+                cycle_soak=cycle_soak,
+                timestamp_ambiguity=ambiguity,
+                evidence=_state_evidence(
+                    item.get("evidence_type"), default="controller-reported"
+                ),
+            )
+        )
+    _audit_tool("list_sprinkler_schedules", count=len(schedules))
+    return SprinklerScheduleList(
+        count=len(schedules),
+        schedules=schedules,
+        read_supported=read_supported,
+        mutations=_unsupported(
+            "Schedule create/update/delete/enable/disable/manual-run request semantics are not verified.",
+            "The private schedule endpoint is known, but no official or captured mutation schema is available.",
+        ),
+    )
+
+
+@mcp.tool(title="Get upcoming sprinkler runs", annotations=READ)
+async def get_sprinkler_upcoming_runs() -> SprinklerUpcomingRuns:
+    """Return only future runs explicitly present in Wyze payloads."""
+    now = datetime.now(UTC)
+    candidates: list[dict[str, Any]] = []
+    for service, keys in (
+        ("get_sprinkler_schedule_runs", ("runs", "schedules")),
+        ("get_sprinkler_schedules", ("schedules",)),
+    ):
+        try:
+            payload = await _sprinkler_response(
+                service, {"limit": 100} if "runs" in service else {}
+            )
+        except HomeAssistantError:
+            continue
+        candidates.extend(_provider_items(payload, *keys))
+    runs: list[UpcomingRun] = []
+    seen: set[tuple[str | None, str, str, tuple[str, ...]]] = set()
+    for item in candidates:
+        starts_at = timestamp_to_iso(item.get("next_run_at"))
+        if starts_at is None or parse_rfc3339(starts_at, "upcoming run") <= now:
+            continue
+        run_id_value = _first(item, "run_id", "schedule_run_id", "id")
+        run_id = str(run_id_value) if run_id_value is not None else None
+        zone_ids = []
+        for zone in _provider_items(item, "zone_runs", "zones"):
+            number = _zone_number(zone)
+            if number is not None:
+                zone_ids.append(normalized_zone_id(number))
+        program_id = _first(item, "program_id", "schedule_id")
+        normalized_program_id = str(program_id) if program_id is not None else None
+        if run_id is None and normalized_program_id is None:
+            continue
+        key = (run_id, normalized_program_id or "", starts_at, tuple(zone_ids))
+        if key in seen:
+            continue
+        seen.add(key)
+        source_value = _first(item, "source", "run_source", "trigger_type")
+        runs.append(
+            UpcomingRun(
+                run_id=run_id,
+                program_id=normalized_program_id,
+                program_name=_first(item, "program_name", "schedule_name", "name"),
+                starts_at=starts_at,
+                zone_ids=zone_ids,
+                source=str(source_value or "unknown"),
+                source_supported=source_value is not None,
+                evidence=("controller-reported" if source_value is not None else None),
+            )
+        )
+    runs.sort(key=lambda item: item.starts_at)
+    _audit_tool("get_sprinkler_upcoming_runs", count=len(runs))
+    return SprinklerUpcomingRuns(
+        count=len(runs),
+        runs=runs,
+        supported=bool(runs),
+        feed_complete=False,
+        limitation=(
+            "Opportunistic records only; Wyze does not expose a guaranteed complete "
+            "upcoming-run feed."
+            if runs
+            else "Unsupported in the current payload: no explicit next_run_at record was available."
+        ),
+    )
+
+
+@mcp.tool(title="Get sprinkler weather and decisions", annotations=READ)
+async def get_sprinkler_weather_and_decisions() -> SprinklerWeatherDecisions:
+    """Return thresholds and retained decisions without inventing raw weather data."""
+    configuration = await get_sprinkler_configuration()
+    threshold_names = {
+        "rain_skip_threshold",
+        "skip_low_temp",
+        "skip_rain",
+        "skip_saturation",
+        "skip_wind",
+    }
+    thresholds = [
+        ThresholdValue(
+            name=item.name,
+            native_key=item.name,
+            value=item.value,
+            unit=(
+                "upstream_unspecified"
+                if isinstance(item.value, (int, float))
+                and not isinstance(item.value, bool)
+                else None
+            ),
+            evidence=item.evidence,
+        )
+        for item in configuration.values
+        if item.name.lower() in threshold_names
+        and not isinstance(item.value, list)
+    ]
+    decisions: list[WeatherDecision] = []
+    try:
+        payload = await _sprinkler_response(
+            "get_sprinkler_schedule_runs", {"limit": 100}
+        )
+    except HomeAssistantError:
+        payload = {}
+    for run in _provider_items(payload, "runs", "schedules"):
+        skipped = _first(run, "skip_state", "skipped")
+        reason = _first(run, "skip_reason", "skipped_reason", "reason")
+        if skipped in {None, False, "false", "not_skipped"} and reason is None:
+            continue
+        parsed_skip = _as_bool(skipped)
+        if parsed_skip is True:
+            decision = "skipped"
+        elif parsed_skip is False or str(skipped or "").lower() == "not_skipped":
+            decision = "evaluated"
+        elif skipped is not None:
+            decision = str(skipped).strip().lower()
+        else:
+            decision = "evaluated"
+        run_id = _first(run, "run_id", "schedule_run_id", "id")
+        decisions.append(
+            WeatherDecision(
+                decision_type="weather_or_manual_skip",
+                decision=decision,
+                reason=str(reason) if reason is not None else None,
+                run_id=str(run_id) if run_id is not None else None,
+                observed_at=timestamp_to_iso(
+                    _first(run, "updated_at", "started_at", "start_ts")
+                ),
+                evidence="controller-reported",
+            )
+        )
+    _audit_tool("get_sprinkler_weather_and_decisions", count=len(decisions))
+    return SprinklerWeatherDecisions(
+        thresholds=thresholds,
+        decisions=decisions,
+        wyze_weather_data=_unsupported(
+            "The integration and captured Wyze payloads do not expose the raw weather observations used by Wyze.",
+            "device_info contains thresholds and schedule_runs contains retained decisions only.",
+        ),
+        sprinkler_plus_calculation=_unsupported(
+            "Wyze does not return the full Sprinkler Plus water-balance inputs or calculation.",
+            "Official support describes the model; private payloads expose modeled moisture and outcomes, not its complete decision record.",
+        ),
+    )
+
+
+@mcp.tool(title="Get sprinkler controller diagnostics", annotations=READ)
+async def get_sprinkler_controller_diagnostics() -> SprinklerDiagnostics:
+    """Read controller health while keeping network identifiers redacted."""
+    try:
+        payload = await _sprinkler_response("get_sprinkler_snapshot")
+        snapshot = (
+            payload.get("snapshot")
+            if isinstance(payload.get("snapshot"), dict)
+            else payload
+        )
+    except HomeAssistantError:
+        snapshot = {}
+    health = (
+        snapshot.get("controller_health")
+        if isinstance(snapshot.get("controller_health"), dict)
+        else snapshot
+    )
+    status = await ha.state(SPRINKLER_STATUS)
+    attributes = dict(status.get("attributes") or {})
+    firmware_value = _first(health, "firmware_version", "firmware", "app_version")
+    if firmware_value is None:
+        firmware_value = _first(
+            attributes, "firmware_version", "firmware", "app_version"
+        )
+    signal_value = _first(
+        health,
+        "signal_strength_native_value",
+        "signal_strength_dbm",
+        "rssi",
+        "RSSI",
+    )
+    if signal_value is None:
+        signal_value = _first(
+            attributes,
+            "signal_strength_native_value",
+            "signal_strength_dbm",
+            "rssi",
+            "RSSI",
+        )
+    ip_value = _first(health, "ip_address", "IP", "ip")
+    if ip_value is None:
+        ip_value = _first(attributes, "ip_address", "IP", "ip")
+    ssid_value = _first(health, "ssid", "SSID")
+    if ssid_value is None:
+        ssid_value = _first(attributes, "ssid", "SSID")
+    firmware_supported = firmware_value is not None
+    signal_strength_supported = signal_value is not None
+    ip_address_supported = ip_value is not None
+    ssid_supported = ssid_value is not None
+    connected_value = health.get("connected", attributes.get("connected"))
+    raw_connectivity_evidence = _first(
+        health, "connectivity_evidence_type", "evidence_type"
+    ) or _first(attributes, "connectivity_evidence_type", "evidence_type")
+    connectivity_supported = (
+        connected_value is not None
+        and str(raw_connectivity_evidence or "").lower() != "unsupported"
+    )
+    _audit_tool("get_sprinkler_controller_diagnostics")
+    no_signal = "No such signal exists in the installed integration/library or captured Wyze irrigation payloads."
+    return SprinklerDiagnostics(
+        connected=connected_value,
+        connectivity_supported=connectivity_supported,
+        connectivity_evidence=(
+            _state_evidence(
+                raw_connectivity_evidence, default="controller-reported"
+            )
+            if connectivity_supported
+            else None
+        ),
+        firmware_version=(str(firmware_value) if firmware_supported else None),
+        firmware_supported=firmware_supported,
+        firmware_evidence=(
+            "controller-reported" if firmware_supported else None
+        ),
+        signal_strength_native_value=_as_int(signal_value),
+        signal_strength_supported=signal_strength_supported,
+        signal_strength_units=(
+            "upstream_unspecified" if signal_strength_supported else None
+        ),
+        signal_strength_evidence=(
+            "controller-reported" if signal_strength_supported else None
+        ),
+        endpoint_health_evidence="inferred",
+        ip_address=None,
+        ip_address_supported=ip_address_supported,
+        ip_address_evidence=(
+            "controller-reported" if ip_address_supported else None
+        ),
+        ip_address_redacted=ip_address_supported,
+        ssid_supported=ssid_supported,
+        ssid_evidence="controller-reported" if ssid_supported else None,
+        ssid_redacted=ssid_supported,
+        endpoint_errors=[
+            str(item)
+            for item in _first(snapshot, "endpoint_errors")
+            or attributes.get("endpoint_errors")
+            or []
+        ],
+        physical_feedback=_unsupported(
+            no_signal,
+            "Controller state is cloud/controller-reported and physical_state_verified is false.",
+        ),
+        measured_flow=_unsupported(
+            no_signal,
+            "flow_rate in the zone payload is configuration, not a measured flow sensor.",
+        ),
+        electrical_load=_unsupported(
+            no_signal,
+            "Wiring fields describe topology/configuration and contain no electrical measurement.",
+        ),
+        valve_faults=_unsupported(
+            no_signal,
+            "No fault-code or physical-open field is present in audited payloads.",
+        ),
+    )
 
 
 @mcp.tool(title="Refresh sprinkler telemetry", annotations=IDEMPOTENT_WRITE)
-async def refresh_sprinkler() -> dict[str, Any]:
+async def refresh_sprinkler() -> SprinklerRefreshResult:
     """Force a bounded Wyze status, metadata, configuration, and history refresh."""
-    _require_write()
+    _require_sprinkler_write("refresh")
     device_id = await _sprinkler_device_id()
     await ha.call_service("wyzeapi", "refresh_sprinkler", {"device_id": [device_id]})
     status = await ha.state(SPRINKLER_STATUS)
     _audit_tool("refresh_sprinkler")
-    return {"status": "completed", "controller": summarize_state(status)}
+    return SprinklerRefreshResult(
+        status="completed",
+        controller=_entity_state_summary(status),
+    )
 
 
 @mcp.tool(title="Run sprinkler zone", annotations=DESTRUCTIVE_WRITE)
@@ -3640,14 +5269,15 @@ async def run_sprinkler_zone(
     zone: Annotated[int, Field(strict=True, ge=1, le=8)],
     duration_minutes: Annotated[float, Field(ge=1, le=180)],
     confirmed: bool = False,
-) -> dict[str, Any]:
+) -> SprinklerCommandResult:
     """Start one enabled zone only after explicit current-turn confirmation."""
-    _require_write()
+    _require_sprinkler_write("run_zone")
     _require_confirmed(confirmed, "Starting a sprinkler zone")
     zones = {item["zone"]: item for item in await _sprinkler_zone_records()}
     if zone not in zones or not zones[zone]["enabled"]:
         raise ValueError("zone must be one currently enabled sprinkler zone")
     device_id = await _sprinkler_device_id()
+    command_id = str(uuid.uuid4())
     await ha.call_service(
         "wyzeapi",
         "run_sprinkler_zone",
@@ -3655,24 +5285,41 @@ async def run_sprinkler_zone(
             "device_id": [device_id],
             "zone": zone,
             "duration_minutes": duration_minutes,
+            "command_id": command_id,
         },
     )
-    _audit_tool("run_sprinkler_zone", zone=zone, duration_minutes=duration_minutes)
-    return {
-        "status": "provider_accepted",
-        "zone": zone,
-        "duration_minutes": duration_minutes,
-        "physical_state_verified": False,
-    }
+    duration_seconds = round(duration_minutes * 60)
+    _audit_tool(
+        "run_sprinkler_zone",
+        command_id=command_id,
+        operation="run_zone",
+        zone=zone,
+        zone_id=normalized_zone_id(zone),
+        native_zone_id=zones[zone].get("native_zone_id"),
+        duration_minutes=duration_minutes,
+        duration_seconds=duration_seconds,
+    )
+    return SprinklerCommandResult(
+        status="provider_accepted",
+        command_id=command_id,
+        operation="run_zone",
+        zones=[
+            {
+                "zone_id": normalized_zone_id(zone),
+                "native_zone_id": zones[zone].get("native_zone_id"),
+                "duration_seconds": duration_seconds,
+            }
+        ],
+    )
 
 
 @mcp.tool(title="Run sprinkler sequence", annotations=DESTRUCTIVE_WRITE)
 async def run_sprinkler_sequence(
     zones: Annotated[list[SprinklerSequenceEntry], Field(min_length=1, max_length=8)],
     confirmed: bool = False,
-) -> dict[str, Any]:
+) -> SprinklerCommandResult:
     """Start an ordered, bounded set of enabled zones after explicit confirmation."""
-    _require_write()
+    _require_sprinkler_write("run_sequence")
     _require_confirmed(confirmed, "Starting a sprinkler sequence")
     requested = [item.model_dump() for item in zones]
     zone_numbers = [item["zone"] for item in requested]
@@ -3688,27 +5335,163 @@ async def run_sprinkler_sequence(
     ):
         raise ValueError("every sequence zone must currently be enabled")
     device_id = await _sprinkler_device_id()
+    command_id = str(uuid.uuid4())
     await ha.call_service(
         "wyzeapi",
         "run_sprinkler_sequence",
-        {"device_id": [device_id], "zones": requested},
+        {"device_id": [device_id], "zones": requested, "command_id": command_id},
     )
-    _audit_tool("run_sprinkler_sequence", zones=zone_numbers)
-    return {
-        "status": "provider_accepted",
-        "zones": requested,
-        "physical_state_verified": False,
-    }
+    command_zones = [
+        {
+            "zone_id": normalized_zone_id(int(item["zone"])),
+            "native_zone_id": available[int(item["zone"])].get("native_zone_id"),
+            "duration_seconds": round(float(item["duration_minutes"]) * 60),
+        }
+        for item in requested
+    ]
+    _audit_tool(
+        "run_sprinkler_sequence",
+        command_id=command_id,
+        operation="run_sequence",
+        zones=command_zones,
+    )
+    return SprinklerCommandResult(
+        status="provider_accepted",
+        command_id=command_id,
+        operation="run_sequence",
+        zones=command_zones,
+    )
+
+
+@mcp.tool(title="Run sprinkler zone for exact seconds", annotations=DESTRUCTIVE_WRITE)
+async def run_sprinkler_zone_exact(
+    zone_id: Annotated[str, Field(pattern=r"^zone-[1-8]$")],
+    duration_seconds: Annotated[int, Field(strict=True, ge=60, le=10_800)],
+    confirmed: bool = False,
+) -> SprinklerCommandResult:
+    """Start one exact enabled zone for an integer number of seconds."""
+    _require_sprinkler_write("run_zone")
+    _require_confirmed(confirmed, "Starting a sprinkler zone")
+    zone = zone_number_from_id(zone_id)
+    zones = {item["zone"]: item for item in await _sprinkler_zone_records()}
+    if zone not in zones or not zones[zone]["enabled"]:
+        raise ValueError("zone_id must identify one currently enabled sprinkler zone")
+    device_id = await _sprinkler_device_id()
+    command_id = str(uuid.uuid4())
+    await ha.call_service(
+        "wyzeapi",
+        "run_sprinkler_zone",
+        {
+            "device_id": [device_id],
+            "zone": zone,
+            "duration_seconds": duration_seconds,
+            "command_id": command_id,
+        },
+    )
+    _audit_tool(
+        "run_sprinkler_zone_exact",
+        command_id=command_id,
+        operation="run_zone",
+        zone=zone,
+        zone_id=zone_id,
+        native_zone_id=zones[zone].get("native_zone_id"),
+        duration_seconds=duration_seconds,
+    )
+    return SprinklerCommandResult(
+        status="provider_accepted",
+        command_id=command_id,
+        operation="run_zone",
+        zones=[
+            {
+                "zone_id": zone_id,
+                "native_zone_id": zones[zone].get("native_zone_id"),
+                "duration_seconds": duration_seconds,
+            }
+        ],
+    )
+
+
+@mcp.tool(title="Run exact sprinkler zone sequence", annotations=DESTRUCTIVE_WRITE)
+async def run_sprinkler_sequence_exact(
+    zones: Annotated[
+        list[SprinklerExactSequenceEntry], Field(min_length=1, max_length=8)
+    ],
+    confirmed: bool = False,
+) -> SprinklerCommandResult:
+    """Run unique enabled zones in order with exact integer-second durations."""
+    _require_sprinkler_write("run_sequence")
+    _require_confirmed(confirmed, "Starting a sprinkler sequence")
+    requested = [item.model_dump() for item in zones]
+    zone_numbers = [zone_number_from_id(str(item["zone_id"])) for item in requested]
+    if len(zone_numbers) != len(set(zone_numbers)):
+        raise ValueError("sprinkler sequence zone_ids must not be duplicated")
+    if sum(int(item["duration_seconds"]) for item in requested) > 10_800:
+        raise ValueError(
+            "total sprinkler sequence duration must not exceed 10800 seconds"
+        )
+    available = {item["zone"]: item for item in await _sprinkler_zone_records()}
+    if any(
+        zone not in available or not available[zone]["enabled"] for zone in zone_numbers
+    ):
+        raise ValueError("every sequence zone_id must currently be enabled")
+    device_id = await _sprinkler_device_id()
+    provider_zones = [
+        {
+            "zone": zone_number_from_id(str(item["zone_id"])),
+            "duration_seconds": int(item["duration_seconds"]),
+        }
+        for item in requested
+    ]
+    command_id = str(uuid.uuid4())
+    await ha.call_service(
+        "wyzeapi",
+        "run_sprinkler_sequence",
+        {
+            "device_id": [device_id],
+            "zones": provider_zones,
+            "command_id": command_id,
+        },
+    )
+    command_zones = [
+        {
+            "zone_id": str(item["zone_id"]),
+            "native_zone_id": available[zone].get("native_zone_id"),
+            "duration_seconds": int(item["duration_seconds"]),
+        }
+        for item, zone in zip(requested, zone_numbers, strict=True)
+    ]
+    _audit_tool(
+        "run_sprinkler_sequence_exact",
+        command_id=command_id,
+        operation="run_sequence",
+        zones=command_zones,
+    )
+    return SprinklerCommandResult(
+        status="provider_accepted",
+        command_id=command_id,
+        operation="run_sequence",
+        zones=command_zones,
+    )
 
 
 @mcp.tool(title="Stop all sprinklers", annotations=IDEMPOTENT_WRITE)
-async def stop_sprinklers() -> dict[str, Any]:
+async def stop_sprinklers() -> SprinklerCommandResult:
     """Stop all sprinkler zones; safe and idempotent even when no zone is running."""
-    _require_write()
+    _require_sprinkler_write("stop")
     device_id = await _sprinkler_device_id()
-    await ha.call_service("wyzeapi", "stop_sprinkler", {"device_id": [device_id]})
-    _audit_tool("stop_sprinklers")
-    return {"status": "accepted"}
+    command_id = str(uuid.uuid4())
+    await ha.call_service(
+        "wyzeapi",
+        "stop_sprinkler",
+        {"device_id": [device_id], "command_id": command_id},
+    )
+    _audit_tool("stop_sprinklers", command_id=command_id, operation="stop")
+    return SprinklerCommandResult(
+        status="provider_accepted",
+        command_id=command_id,
+        operation="stop",
+        zones=[],
+    )
 
 
 @mcp.tool(title="Add to-do item", annotations=WRITE)

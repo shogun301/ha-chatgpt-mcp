@@ -82,7 +82,7 @@ SPRINKLER_ZONE_ENTITY_PREFIX = (
     _optional("SPRINKLER_ZONE_ENTITY_PREFIX") or f"{SPRINKLER_ENTITY_PREFIX}_zone"
 )
 try:
-    SPRINKLER_ZONE_COUNT = int(_optional("SPRINKLER_ZONE_COUNT") or "3")
+    SPRINKLER_ZONE_COUNT = int(_optional("SPRINKLER_ZONE_COUNT") or "8")
 except ValueError as exc:
     raise RuntimeError(
         "SPRINKLER_ZONE_COUNT must be an integer from 1 through 8"

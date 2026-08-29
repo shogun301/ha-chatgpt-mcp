@@ -5,8 +5,11 @@ the bounded home-LAN diagnostics added in MCP 2.5.0, and persistent Home
 Assistant capability synchronization added in MCP 2.6.0 and the SolarEdge
 one-sample power-flow artifact filter added in MCP 2.6.1, and exact configured
 sprinkler/forecast automation actions added in MCP 2.6.2.
-It does not authorize device actions, service restarts, firewall changes, or
-raw-log collection.
+It also covers the transactional Wyze sprinkler overlay and typed MCP 2.7.0
+read/command boundary.
+It does not authorize device actions, ad hoc service restarts, firewall changes,
+or raw-log collection. The sole Home Assistant restart described below is the
+transactional, rollback-guarded overlay load step.
 
 ## Components and data flow
 
@@ -62,13 +65,14 @@ completeness instead of being silently treated as healthy.
 Use the established production deployment script, which requires a clean Git
 checkout, exports the exact commit with `git archive`, validates every tracked
 build input, builds and smoke-tests the immutable image, runs the full suite
-with networking disabled, creates timestamped backups, installs/enables the
-included systemd unit, deploys MCP 2.6.3, and performs read-only health checks.
+with networking disabled, creates timestamped backups, installs or restarts the
+included systemd unit only when its immutable content hash changes, deploys the Wyze overlay and MCP 2.7.0 from one exact
+public commit, and performs read-only health checks.
 Do not hand-copy secrets or add a Docker-socket mount.
 
 Before deployment:
 
-1. Confirm the release version is 2.6.3 and the expected tool count is 99.
+1. Confirm the release version is 2.7.0 and the expected tool count is 107.
 2. Review the complete diff, especially OAuth scope defaults, fixed probe
    targets, collector command constants, Compose mounts, and systemd hardening.
 3. Confirm backups exclude credentials and include the previous application,
@@ -84,6 +88,50 @@ Do not restart Home Assistant merely to deploy diagnostics.
 
 After deployment, keep `/var/lib/ha-host-diagnostics` intact. It is operational
 evidence, not disposable application state.
+
+### Wyze sprinkler overlay
+
+`scripts/deploy-production.ps1` invokes `scripts/deploy-wyzeapi-overlay.ps1`
+from the same 40-character release commit only after the MCP image has passed
+clean-archive, build, integrity, hermetic-suite, smoke, Compose, and host-security
+preflight. The overlay runs immediately before MCP container cutover. For an
+independently reviewed overlay-only deployment, use:
+
+```powershell
+.\scripts\deploy-wyzeapi-overlay.ps1 `
+  -AwsProfile <profile> -AwsRegion <region> -InstanceName <instance> `
+  -ReleaseCommit <exact-public-main-commit>
+```
+
+The deployer accepts only a clean checkout at that commit and archives only the
+tracked overlay. It requires every destination runtime file to match either the
+documented 0.1.39 base hash or the exact 0.1.40 candidate hash. Before copying,
+it creates a root-only component backup under
+`/opt/homeassistant/wyzeapi-overlay-backups`, syntax-checks all Python modules,
+parses `services.yaml`, and runs the Home Assistant configuration checker.
+
+Loading new Python modules requires a full `homeassistant` container restart;
+a config-entry reload is not acceptance. After the restart, the deployer
+requires the eight exact `wyzeapi` services and invokes only
+`get_sprinkler_snapshot`, `get_sprinkler_schedule_runs`,
+`get_sprinkler_schedules`, and `get_sprinkler_capabilities` with response data.
+It never calls refresh, run, sequence, stop, or an automation. A post-copy
+failure restores the exact backup and performs another full Home Assistant
+restart; rollback failure exits distinctly rather than claiming recovery.
+The combined deployer's outer rollback also restores and revalidates the prior
+overlay whenever a later MCP cutover or acceptance step fails, preventing a new
+overlay from remaining paired with the old MCP image.
+The MCP cutover force-recreates only `ha-chatgpt-mcp`. It leaves the collector
+and `cloudflared` running when their content/configuration and image identities
+are unchanged; a changed collector or tunnel is restarted independently and
+rolled back symmetrically. The outer overlay backup is allocated before the
+child deployer can mutate Home Assistant, and rollback clears its transaction
+flag only after file, restart, config-entry, service, and entity validation all
+succeed.
+
+The source distribution retains the upstream Apache-2.0 license, NOTICE, SPDX
+headers, and modification attribution. The public audit rejects their removal
+and rejects workstation user-profile paths in release files.
 
 ## Production verification
 
@@ -102,25 +150,30 @@ failure:
    the pre-deployment baseline. There must be no new public listener, firewall
    or security-group opening, public route, or broadened tunnel permission.
    Confirm Cloudflare metrics port 49312 remains loopback-only.
-4. **MCP registry:** authenticated discovery reports version 2.6.3 and exactly
-   99 tools, preserving the prior 89 names and adding capability sync,
-   sprinkler, calendar, schedule, and time tools.
-5. **Authorization:** unauthenticated and invalid-token requests are rejected.
+4. **MCP registry:** authenticated discovery reports version 2.7.0 and exactly
+   107 tools. Compare every live input schema, output schema, annotation, and
+   tool name with `tests/fixtures/server-contract-2.7.0.json`.
+5. **Sprinkler inventory:** compare the MCP normalized zone IDs, native IDs, and
+   count with the read-only `wyzeapi.get_sprinkler_snapshot` response. The
+   deployed configuration is eight zones, and acceptance fails if either side
+   omits or invents a live controller zone.
+6. **Authorization:** unauthenticated and invalid-token requests are rejected.
    Each diagnostic tool rejects read-only, write-only, and diagnostics-only
    grants. Both `mcp:read mcp:diagnostics` and the existing strongest
    `mcp:read mcp:write` grant succeed.
-6. **Diagnostic results:** call all seven tools through the production OAuth path.
+7. **Diagnostic results:** call all seven tools through the production OAuth path.
    Verify 60-second snapshot cadence, age/completeness fields, bounded windows,
    result limits, fixed route separation, redaction, and no prohibited
    identifiers.
-7. **Regression:** use read-only calls to verify overview, dashboards,
+8. **Regression:** use read-only calls to verify overview, dashboards,
    schedules, automations, SolarEdge summaries, thermostat summaries, media
-   capabilities, vacuum rooms, sprinkler summary, and backup status. Do not
-   issue a service call or change any device state.
-8. **Capability persistence:** call `get_capability_sync_status` with refresh,
+   capabilities, vacuum rooms, all sprinkler read tools, and backup status. Do
+   not call refresh, run, sequence, stop, schedule mutation, or any device-state
+   service during acceptance.
+9. **Capability persistence:** call `get_capability_sync_status` with refresh,
    require `in_sync`, verify a 300-second interval and a persisted baseline for
-    version 2.6.3, then confirm the file remains under `/data` across MCP restart.
-9. **Persistence:** restart only the collector in a controlled maintenance
+    version 2.7.0, then confirm the file remains under `/data` across MCP restart.
+10. **Persistence:** restart only the collector in a controlled maintenance
    check if necessary. Confirm prior ledgers remain readable and the next sample
    appends normally. Do not restart Home Assistant to test persistence.
 

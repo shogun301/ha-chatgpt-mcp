@@ -9,7 +9,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$releaseVersion = '2.6.3'
+$releaseVersion = '2.7.0'
 $sourceRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $secretRoot = if ($SecretStagingPath) { [IO.Path]::GetFullPath($SecretStagingPath) } else { $null }
 $requiredSecrets = @(
@@ -22,7 +22,9 @@ $requiredSourceFiles = @(
     'docker-compose.yml',
     'collector/ha_host_diagnostics.py',
     'collector/ha-host-diagnostics.service',
-    'collector/README.md'
+    'collector/README.md',
+    'scripts/deploy-wyzeapi-overlay.ps1',
+    'home_assistant/wyzeapi_overlay/README.md'
 )
 foreach ($relativePath in $requiredSourceFiles) {
     if (-not (Test-Path -LiteralPath (Join-Path $sourceRoot $relativePath) -PathType Leaf)) {
@@ -74,6 +76,7 @@ if ($LASTEXITCODE -ne 0 -or -not ($ciRuns | Where-Object {
 })) {
     throw 'GitHub Public safety CI is not green on the exact release commit.'
 }
+
 $tempBase = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
 $tempDir = Join-Path $tempBase ("ha-mcp-deploy-" + [guid]::NewGuid().ToString('N'))
 $keyPath = Join-Path $tempDir 'lightsail'
@@ -83,6 +86,10 @@ $archiveName = "ha-chatgpt-mcp-$releaseVersion.tar.gz"
 $remoteScriptName = "ha-chatgpt-mcp-deploy-$releaseVersion.sh"
 $archivePath = Join-Path $tempDir $archiveName
 $remoteScriptPath = Join-Path $tempDir $remoteScriptName
+$overlayArchiveName = "wyzeapi-overlay-$releaseCommit.tar.gz"
+$overlayScriptName = "deploy-wyzeapi-overlay-$releaseCommit.sh"
+$overlayArchivePath = Join-Path $tempDir $overlayArchiveName
+$overlayScriptPath = Join-Path $tempDir $overlayScriptName
 $sshFailsafePath = Join-Path $tempDir 'close-temporary-ssh.ps1'
 $firewallOpened = $false
 $temporarySshCidr = $null
@@ -94,10 +101,10 @@ set -Eeuo pipefail
 set +x
 umask 077
 
-release_version='2.6.3'
+release_version='2.7.0'
 release_commit='__RELEASE_COMMIT__'
 archive_sha256='__ARCHIVE_SHA256__'
-archive_path='/tmp/ha-chatgpt-mcp-2.6.3.tar.gz'
+archive_path='/tmp/ha-chatgpt-mcp-2.7.0.tar.gz'
 candidate_tag="ha-chatgpt-mcp:candidate-$release_commit"
 release_stage=$(mktemp -d /tmp/ha-mcp-release.XXXXXX)
 app_root='/opt/ha-chatgpt-mcp'
@@ -111,15 +118,29 @@ app_backup="$backup_root/pre-$release_version-$stamp.tar.gz"
 collector_backup="$backup_root/ha-host-diagnostics-$stamp.tar.gz"
 unit_backup="$backup_root/ha-host-diagnostics.service-$stamp"
 rollback_tag="ha-chatgpt-mcp:rollback-$stamp"
+tunnel_rollback_tag="ha-chatgpt-cloudflared:rollback-$stamp"
 mutated=0
 collector_existed=0
 unit_existed=0
+collector_changed=0
+collector_candidate_hash=''
+collector_installed_hash=''
 prior_image_id=''
 prior_image_ref=''
 tested_image_id=''
 smoke_container="ha-mcp-release-smoke-$stamp"
 prior_collector_enabled='disabled'
 prior_collector_active='inactive'
+prior_collector_active_enter=''
+tunnel_changed=0
+prior_tunnel_image_id=''
+prior_tunnel_image_ref=''
+prior_tunnel_started=''
+desired_tunnel_image_id=''
+overlay_mutated=0
+overlay_backup="/opt/homeassistant/wyzeapi-overlay-backups/wyzeapi-pre-0.1.40-main-$stamp.tar.gz"
+overlay_baseline='/tmp/ha-mcp-overlay-baseline'
+overlay_target='/opt/homeassistant/config/custom_components/wyzeapi'
 homeassistant_started_before=''
 caddy_started_before=''
 stage='initializing'
@@ -154,10 +175,128 @@ cleanup_staging() {
   sudo docker rm -f "$smoke_container" >/dev/null 2>&1 || true
   sudo docker image rm "$candidate_tag" >/dev/null 2>&1 || true
   sudo rm -rf -- "$release_stage"
-  sudo rm -f -- "$archive_path" "/tmp/ha-chatgpt-mcp-deploy-$release_version.sh"
+  sudo rm -rf -- "$overlay_baseline"
+  sudo rm -f -- "$archive_path" "/tmp/ha-chatgpt-mcp-deploy-$release_version.sh" \
+    "/tmp/__OVERLAY_ARCHIVE_NAME__" "/tmp/__OVERLAY_SCRIPT_NAME__"
   for secret_name in solaredge_client_id solaredge_client_secret solaredge_token_key solaredge_bridge_secret; do
     sudo rm -f -- "/tmp/$secret_name"
   done
+}
+
+collector_content_hash() {
+  local program=$1 readme=$2 unit=$3
+  if [ ! -f "$program" ] || [ ! -f "$readme" ] || [ ! -f "$unit" ]; then
+    printf 'missing\n'
+    return 0
+  fi
+  sha256sum "$program" "$readme" "$unit" | awk '{print $1}' | sha256sum | awk '{print $1}'
+}
+
+tunnel_config_hash() {
+  sudo awk '/^  cloudflared:/{found=1} found{print}' "$1" | sha256sum | awk '{print $1}'
+}
+
+tunnel_image_ref() {
+  sudo awk '/^  cloudflared:/{found=1; next} found && $1 == "image:" {print $2; exit}' "$1"
+}
+
+wait_ha_api() {
+  local token
+  token=$(sudo cat "$app_root/secrets/ha_token")
+  for attempt in $(seq 1 180); do
+    if curl --fail --silent --max-time 5 -H "Authorization: Bearer $token" \
+      http://127.0.0.1:8123/api/config >/tmp/ha-mcp-overlay-ha-config.json; then
+      return 0
+    fi
+    sudo docker inspect -f '{{.State.Running}}' homeassistant | grep -Fxq true
+    sleep 1
+  done
+  return 1
+}
+
+capture_loaded_entries_main() {
+  local output=$1
+  sudo docker exec ha-chatgpt-mcp python -c '
+import asyncio
+import json
+from pathlib import Path
+import aiohttp
+async def capture():
+    token = Path("/run/secrets/ha_token").read_text(encoding="utf-8").strip()
+    async with aiohttp.ClientSession() as session:
+        async with session.ws_connect("http://127.0.0.1:8123/api/websocket") as ws:
+            assert (await ws.receive_json()).get("type") == "auth_required"
+            await ws.send_json({"type": "auth", "access_token": token})
+            assert (await ws.receive_json()).get("type") == "auth_ok"
+            await ws.send_json({"id": 1, "type": "config_entries/get"})
+            reply = await ws.receive_json()
+            assert reply.get("success") is True
+            print(json.dumps(sorted(item["entry_id"] for item in reply.get("result", []) if item.get("state") == "loaded")))
+asyncio.run(capture())
+' | sudo tee "$output" >/dev/null
+}
+
+capture_overlay_runtime_main() {
+  local output=$1
+  local token device_id
+  token=$(sudo cat "$app_root/secrets/ha_token") || return 1
+  device_id=$(sudo cat "$overlay_baseline/device_id") || return 1
+  curl --fail --silent --max-time 15 -H "Authorization: Bearer $token" \
+    http://127.0.0.1:8123/api/services >/tmp/ha-mcp-overlay-services.json || return 1
+  curl --fail --silent --max-time 15 -H "Authorization: Bearer $token" \
+    http://127.0.0.1:8123/api/states >/tmp/ha-mcp-overlay-states.json || return 1
+  sudo python3 - "$device_id" "$output" <<'PY' || return 1
+import json
+import sys
+device_id, output = sys.argv[1:]
+with open('/tmp/ha-mcp-overlay-services.json', encoding='utf-8') as handle:
+    services = {item['domain']: sorted(item['services']) for item in json.load(handle)}
+with open('/tmp/ha-mcp-overlay-states.json', encoding='utf-8') as handle:
+    states = {item['entity_id']: item['state'] for item in json.load(handle)}
+with open('/opt/homeassistant/config/.storage/core.entity_registry', encoding='utf-8') as handle:
+    registry = json.load(handle)['data']['entities']
+ids = sorted(item['entity_id'] for item in registry if item.get('device_id') == device_id and item.get('entity_id') in states)
+with open(output, 'w', encoding='utf-8') as handle:
+    json.dump({'services': services.get('wyzeapi', []), 'entities': {item: states[item] != 'unavailable' for item in ids}}, handle, sort_keys=True)
+PY
+}
+
+rollback_overlay() {
+  local verify_root current_entries
+  [ "$overlay_mutated" -eq 1 ] || return 0
+  case "${HA_MCP_FAIL_OVERLAY_ROLLBACK_STEP:-}" in
+    tar|restart|cmp) return 1 ;;
+  esac
+  sudo test -f "$overlay_backup" || return 1
+  sudo rm -rf -- "$overlay_target" || return 1
+  sudo tar -xzf "$overlay_backup" -C /opt/homeassistant/config/custom_components || return 1
+  verify_root=$(mktemp -d /tmp/ha-mcp-overlay-verify.XXXXXX) || return 1
+  sudo tar -xzf "$overlay_backup" -C "$verify_root" || return 1
+  sudo diff -qr --no-dereference "$overlay_target" "$verify_root/wyzeapi" >/dev/null || return 1
+  sudo rm -rf -- "$verify_root" || return 1
+  sudo docker restart homeassistant >/dev/null || return 1
+  wait_ha_api || return 1
+  for attempt in $(seq 1 180); do
+    current_entries="$overlay_baseline/loaded-current.json"
+    if capture_loaded_entries_main "$current_entries" && sudo python3 -c '
+import json,sys
+def load(path):
+    with open(path, encoding="utf-8") as handle: return set(json.load(handle))
+assert load(sys.argv[1]) <= load(sys.argv[2])
+' "$overlay_baseline/loaded-before.json" "$current_entries"; then
+      break
+    fi
+    sleep 1 || return 1
+  done
+  sudo python3 -c '
+import json,sys
+def load(path):
+    with open(path, encoding="utf-8") as handle: return set(json.load(handle))
+assert load(sys.argv[1]) <= load(sys.argv[2])
+' "$overlay_baseline/loaded-before.json" "$current_entries" || return 1
+  capture_overlay_runtime_main "$overlay_baseline/runtime-current.json" || return 1
+  sudo cmp -s "$overlay_baseline/runtime-before.json" "$overlay_baseline/runtime-current.json" || return 1
+  overlay_mutated=0
 }
 
 rollback() {
@@ -165,7 +304,9 @@ rollback() {
   local rollback_failed=0
   local restored_image_id=''
   stage='rolling_back'
-  sudo systemctl stop ha-host-diagnostics.service >/dev/null 2>&1 || rollback_failed=1
+  if [ "$collector_changed" -eq 1 ]; then
+    sudo systemctl stop ha-host-diagnostics.service >/dev/null 2>&1 || rollback_failed=1
+  fi
   if [ -f "$app_backup" ]; then
     sudo find "$app_root" -mindepth 1 -maxdepth 1 \
       ! -name secrets ! -name data ! -name logs ! -name backups \
@@ -174,44 +315,50 @@ rollback() {
   else
     rollback_failed=1
   fi
-  if [ "$collector_existed" -eq 1 ]; then
-    if [ -f "$collector_backup" ]; then
+  if [ "$collector_changed" -eq 1 ]; then
+    if [ "$collector_existed" -eq 1 ]; then
+      if [ -f "$collector_backup" ]; then
+        sudo rm -rf -- "$collector_root" || rollback_failed=1
+        sudo tar -xzf "$collector_backup" -C / || rollback_failed=1
+      else
+        rollback_failed=1
+      fi
+    else
       sudo rm -rf -- "$collector_root" || rollback_failed=1
-      sudo tar -xzf "$collector_backup" -C / || rollback_failed=1
-    else
-      rollback_failed=1
     fi
-  else
-    sudo rm -rf -- "$collector_root" || rollback_failed=1
-  fi
-  if [ "$unit_existed" -eq 1 ]; then
-    if [ -f "$unit_backup" ]; then
-      sudo install -o root -g root -m 0644 "$unit_backup" "$collector_unit" || rollback_failed=1
+    if [ "$unit_existed" -eq 1 ]; then
+      if [ -f "$unit_backup" ]; then
+        sudo install -o root -g root -m 0644 "$unit_backup" "$collector_unit" || rollback_failed=1
+      else
+        rollback_failed=1
+      fi
     else
-      rollback_failed=1
+      sudo rm -f -- "$collector_unit" || rollback_failed=1
     fi
-  else
-    sudo rm -f -- "$collector_unit" || rollback_failed=1
-  fi
-  sudo systemctl daemon-reload || rollback_failed=1
-  if [ "$unit_existed" -eq 1 ]; then
-    if [[ "$prior_collector_enabled" == enabled* ]]; then
-      sudo systemctl enable ha-host-diagnostics.service >/dev/null 2>&1 || rollback_failed=1
+    sudo systemctl daemon-reload || rollback_failed=1
+    if [ "$unit_existed" -eq 1 ]; then
+      if [[ "$prior_collector_enabled" == enabled* ]]; then
+        sudo systemctl enable ha-host-diagnostics.service >/dev/null 2>&1 || rollback_failed=1
+      else
+        sudo systemctl disable ha-host-diagnostics.service >/dev/null 2>&1 || rollback_failed=1
+      fi
+      if [ "$prior_collector_active" = 'active' ]; then
+        sudo systemctl restart ha-host-diagnostics.service >/dev/null 2>&1 || rollback_failed=1
+      fi
     else
       sudo systemctl disable ha-host-diagnostics.service >/dev/null 2>&1 || rollback_failed=1
     fi
-    if [ "$prior_collector_active" = 'active' ]; then
-      sudo systemctl restart ha-host-diagnostics.service >/dev/null 2>&1 || rollback_failed=1
-    fi
-  else
-    sudo systemctl disable ha-host-diagnostics.service >/dev/null 2>&1 || rollback_failed=1
   fi
   if [ -n "$prior_image_id" ] && [ -n "$prior_image_ref" ]; then
     sudo docker image tag "$rollback_tag" "$prior_image_ref" || rollback_failed=1
   fi
   if [ -f "$app_root/docker-compose.yml" ]; then
     cd "$app_root"
-    sudo docker compose up -d --no-deps --force-recreate ha-chatgpt-mcp cloudflared >/dev/null 2>&1 || rollback_failed=1
+    sudo docker compose up -d --no-deps --force-recreate ha-chatgpt-mcp >/dev/null 2>&1 || rollback_failed=1
+    if [ "$tunnel_changed" -eq 1 ]; then
+      sudo docker image tag "$tunnel_rollback_tag" "$prior_tunnel_image_ref" || rollback_failed=1
+      sudo docker compose up -d --no-deps --force-recreate cloudflared >/dev/null 2>&1 || rollback_failed=1
+    fi
   else
     rollback_failed=1
   fi
@@ -219,6 +366,12 @@ rollback() {
     restored_image_id=$(sudo docker container inspect -f '{{.Image}}' ha-chatgpt-mcp 2>/dev/null || true)
     [ "$restored_image_id" = "$prior_image_id" ] || rollback_failed=1
   fi
+  if [ "$tunnel_changed" -eq 1 ]; then
+    [ "$(sudo docker container inspect -f '{{.Image}}' ha-chatgpt-cloudflared 2>/dev/null || true)" = "$prior_tunnel_image_id" ] || rollback_failed=1
+  else
+    [ "$(sudo docker container inspect -f '{{.State.StartedAt}}' ha-chatgpt-cloudflared 2>/dev/null || true)" = "$prior_tunnel_started" ] || rollback_failed=1
+  fi
+  rollback_overlay || rollback_failed=1
   if [ "$unit_existed" -eq 1 ]; then
     sudo test -f "$collector_unit" || rollback_failed=1
     if [[ "$prior_collector_enabled" == enabled* ]]; then
@@ -228,6 +381,9 @@ rollback() {
     fi
     if [ "$prior_collector_active" = 'active' ]; then
       sudo systemctl is-active --quiet ha-host-diagnostics.service || rollback_failed=1
+      if [ "$collector_changed" -eq 0 ]; then
+        [ "$(sudo systemctl show -p ActiveEnterTimestampMonotonic --value ha-host-diagnostics.service)" = "$prior_collector_active_enter" ] || rollback_failed=1
+      fi
     else
       ! sudo systemctl is-active --quiet ha-host-diagnostics.service || rollback_failed=1
     fi
@@ -335,15 +491,27 @@ sudo install -d -o root -g root -m 0700 "$backup_root"
 sudo tar -czf "$app_backup" \
   --exclude='./secrets' --exclude='./data' --exclude='./logs' --exclude='./backups' \
   -C "$app_root" .
-if [ -d "$collector_root" ]; then
-  collector_existed=1
-  sudo tar -czf "$collector_backup" -C / "${collector_root#/}"
-fi
 if [ -f "$collector_unit" ]; then
   unit_existed=1
-  sudo cp --preserve=mode,ownership,timestamps "$collector_unit" "$unit_backup"
   prior_collector_enabled=$(sudo systemctl is-enabled ha-host-diagnostics.service 2>/dev/null || true)
   prior_collector_active=$(sudo systemctl is-active ha-host-diagnostics.service 2>/dev/null || true)
+  prior_collector_active_enter=$(sudo systemctl show -p ActiveEnterTimestampMonotonic --value ha-host-diagnostics.service 2>/dev/null || true)
+fi
+collector_candidate_hash=$(collector_content_hash \
+  "$release_stage/collector/ha_host_diagnostics.py" \
+  "$release_stage/collector/README.md" \
+  "$release_stage/collector/ha-host-diagnostics.service")
+collector_installed_hash=$(collector_content_hash \
+  "$collector_program" "$collector_root/README.md" "$collector_unit")
+if [ "$collector_candidate_hash" != "$collector_installed_hash" ]; then
+  collector_changed=1
+  if [ -d "$collector_root" ]; then
+    collector_existed=1
+    sudo tar -czf "$collector_backup" -C / "${collector_root#/}"
+  fi
+  if [ "$unit_existed" -eq 1 ]; then
+    sudo cp --preserve=mode,ownership,timestamps "$collector_unit" "$unit_backup"
+  fi
 fi
 if sudo docker container inspect ha-chatgpt-mcp >/dev/null 2>&1; then
   prior_image_id=$(sudo docker container inspect -f '{{.Image}}' ha-chatgpt-mcp)
@@ -352,6 +520,18 @@ if sudo docker container inspect ha-chatgpt-mcp >/dev/null 2>&1; then
 fi
 homeassistant_started_before=$(sudo docker container inspect -f '{{.State.StartedAt}}' homeassistant)
 caddy_started_before=$(sudo docker container inspect -f '{{.State.StartedAt}}' caddy)
+prior_tunnel_image_id=$(sudo docker container inspect -f '{{.Image}}' ha-chatgpt-cloudflared)
+prior_tunnel_image_ref=$(sudo docker container inspect -f '{{.Config.Image}}' ha-chatgpt-cloudflared)
+prior_tunnel_started=$(sudo docker container inspect -f '{{.State.StartedAt}}' ha-chatgpt-cloudflared)
+prior_tunnel_config_hash=$(tunnel_config_hash "$app_root/docker-compose.yml")
+candidate_tunnel_config_hash=$(tunnel_config_hash "$release_stage/docker-compose.yml")
+candidate_tunnel_image_ref=$(tunnel_image_ref "$release_stage/docker-compose.yml")
+desired_tunnel_image_id=$(sudo docker image inspect -f '{{.Id}}' "$candidate_tunnel_image_ref")
+if [ "$prior_tunnel_config_hash" != "$candidate_tunnel_config_hash" ] || \
+   [ "$prior_tunnel_image_id" != "$desired_tunnel_image_id" ]; then
+  tunnel_changed=1
+  sudo docker image tag "$prior_tunnel_image_id" "$tunnel_rollback_tag"
+fi
 
 mutated=1
 sudo docker image tag "$candidate_tag" "ha-chatgpt-mcp:$release_version"
@@ -366,41 +546,48 @@ if [ -s /tmp/solaredge_client_id ]; then
   done
 fi
 
-sudo install -d -o root -g root -m 0750 "$collector_root"
-sudo install -d -o root -g 10001 -m 0750 "$collector_state"
-sudo install -d -o root -g root -m 0700 "$collector_state/state"
-sudo install -d -o root -g 10001 -m 0750 "$collector_state/export"
-sudo /usr/bin/python3 -m py_compile "$app_root/collector/ha_host_diagnostics.py"
-collector_validation=$(sudo /usr/bin/python3 "$app_root/collector/ha_host_diagnostics.py" validate)
-python3 -c 'import json, sys; assert json.load(sys.stdin).get("ok") is True' <<<"$collector_validation"
-sudo install -o root -g root -m 0750 \
-  "$app_root/collector/ha_host_diagnostics.py" "$collector_program"
-sudo install -o root -g root -m 0644 \
-  "$app_root/collector/README.md" "$collector_root/README.md"
-sudo install -o root -g root -m 0644 \
-  "$app_root/collector/ha-host-diagnostics.service" "$collector_unit"
-
-sudo /usr/bin/python3 -m py_compile "$collector_program"
-collector_validation=$(sudo /usr/bin/python3 "$collector_program" validate)
-python3 -c 'import json, sys; assert json.load(sys.stdin).get("ok") is True' <<<"$collector_validation"
-sudo systemd-analyze verify "$collector_unit"
-sudo systemctl daemon-reload
-stage='starting_collector'
-collector_started_epoch=$(date -u +%s)
-sudo systemctl enable ha-host-diagnostics.service
-sudo systemctl restart ha-host-diagnostics.service
-stage='awaiting_fresh_collector_snapshot'
-for attempt in $(seq 1 180); do
-  if sudo test -s "$collector_state/export/current.json" && \
-     [ "$(sudo stat -c %Y "$collector_state/export/current.json")" -ge "$collector_started_epoch" ]; then
-    break
-  fi
+if [ "$collector_changed" -eq 1 ]; then
+  sudo install -d -o root -g root -m 0750 "$collector_root"
+  sudo install -d -o root -g 10001 -m 0750 "$collector_state"
+  sudo install -d -o root -g root -m 0700 "$collector_state/state"
+  sudo install -d -o root -g 10001 -m 0750 "$collector_state/export"
+  sudo /usr/bin/python3 -m py_compile "$app_root/collector/ha_host_diagnostics.py"
+  collector_validation=$(sudo /usr/bin/python3 "$app_root/collector/ha_host_diagnostics.py" validate)
+  python3 -c 'import json, sys; assert json.load(sys.stdin).get("ok") is True' <<<"$collector_validation"
+  sudo install -o root -g root -m 0750 \
+    "$app_root/collector/ha_host_diagnostics.py" "$collector_program"
+  sudo install -o root -g root -m 0644 \
+    "$app_root/collector/README.md" "$collector_root/README.md"
+  sudo install -o root -g root -m 0644 \
+    "$app_root/collector/ha-host-diagnostics.service" "$collector_unit"
+  sudo /usr/bin/python3 -m py_compile "$collector_program"
+  collector_validation=$(sudo /usr/bin/python3 "$collector_program" validate)
+  python3 -c 'import json, sys; assert json.load(sys.stdin).get("ok") is True' <<<"$collector_validation"
+  sudo systemd-analyze verify "$collector_unit"
+  sudo systemctl daemon-reload
+  stage='starting_changed_collector'
+  collector_started_epoch=$(date -u +%s)
+  sudo systemctl enable ha-host-diagnostics.service
+  sudo systemctl restart ha-host-diagnostics.service
+  stage='awaiting_fresh_collector_snapshot'
+  for attempt in $(seq 1 180); do
+    if sudo test -s "$collector_state/export/current.json" && \
+       [ "$(sudo stat -c %Y "$collector_state/export/current.json")" -ge "$collector_started_epoch" ]; then
+      break
+    fi
+    sudo systemctl is-active --quiet ha-host-diagnostics.service
+    sleep 1
+  done
+  sudo test -s "$collector_state/export/current.json"
+  collector_snapshot_epoch=$(sudo stat -c %Y "$collector_state/export/current.json")
+  [ "$collector_snapshot_epoch" -ge "$collector_started_epoch" ]
+else
+  stage='verifying_unchanged_collector'
+  [ "$(collector_content_hash "$collector_program" "$collector_root/README.md" "$collector_unit")" = "$collector_candidate_hash" ]
+  sudo systemctl is-enabled --quiet ha-host-diagnostics.service
   sudo systemctl is-active --quiet ha-host-diagnostics.service
-  sleep 1
-done
-sudo test -s "$collector_state/export/current.json"
-collector_snapshot_epoch=$(sudo stat -c %Y "$collector_state/export/current.json")
-[ "$collector_snapshot_epoch" -ge "$collector_started_epoch" ]
+  [ "$(sudo systemctl show -p ActiveEnterTimestampMonotonic --value ha-host-diagnostics.service)" = "$prior_collector_active_enter" ]
+fi
 stage='recording_start_marker'
 record_marker started
 
@@ -409,8 +596,38 @@ stage='validating_compose'
 sudo docker compose config --quiet
 stage='running_host_security_tests'
 sudo /usr/bin/python3 -m unittest tests.test_deployment_security -v
-stage='recreating_mcp_and_tunnel'
-sudo docker compose up -d --no-deps --force-recreate ha-chatgpt-mcp cloudflared
+stage='capturing_pre_overlay_runtime'
+sudo install -d -o root -g root -m 0700 "$overlay_baseline"
+sudo python3 - <<'PY' | sudo tee "$overlay_baseline/device_id" >/dev/null
+import json
+with open('/opt/homeassistant/config/.storage/core.device_registry', encoding='utf-8') as handle:
+    devices = json.load(handle)['data']['devices']
+matches = [item['id'] for item in devices if item.get('manufacturer') == 'WyzeLabs' and item.get('model') == 'BS_WK1']
+assert len(matches) == 1
+print(matches[0])
+PY
+capture_loaded_entries_main "$overlay_baseline/loaded-before.json"
+capture_overlay_runtime_main "$overlay_baseline/runtime-before.json"
+stage='deploying_wyze_overlay'
+sudo install -d -o root -g root -m 0700 "$(dirname "$overlay_backup")"
+sudo test ! -e "$overlay_backup"
+sudo tar -czf "$overlay_backup" -C /opt/homeassistant/config/custom_components wyzeapi
+overlay_mutated=1
+bash "/tmp/__OVERLAY_SCRIPT_NAME__" "$overlay_backup"
+sudo test -f "$overlay_backup"
+if [ "${HA_MCP_FAIL_AFTER_OVERLAY_SUCCESS:-0}" = 1 ]; then
+  stage='injected_failure_after_overlay_success'
+  false
+fi
+homeassistant_started_before=$(sudo docker container inspect -f '{{.State.StartedAt}}' homeassistant)
+stage='recreating_mcp'
+sudo docker compose up -d --no-deps --force-recreate ha-chatgpt-mcp
+if [ "$tunnel_changed" -eq 1 ]; then
+  stage='recreating_changed_tunnel'
+  sudo docker compose up -d --no-deps --force-recreate cloudflared
+else
+  test "$(sudo docker container inspect -f '{{.State.StartedAt}}' ha-chatgpt-cloudflared)" = "$prior_tunnel_started"
+fi
 test "$(sudo docker container inspect -f '{{.Image}}' ha-chatgpt-mcp)" = "$tested_image_id"
 test "$(sudo docker image inspect -f '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
   "$tested_image_id")" = "$release_commit"
@@ -429,7 +646,7 @@ with open('/tmp/ha-mcp-health.json', encoding='utf-8') as handle:
     payload = json.load(handle)
 assert payload.get('status') == 'ok'
 assert payload.get('home_assistant', {}).get('reachable') is True
-assert payload.get('service_version') == '2.6.3'
+assert payload.get('service_version') == '2.7.0'
 PY
 rm -f /tmp/ha-mcp-health.json
 curl --fail --silent --max-time 5 http://127.0.0.1:8123/ >/dev/null
@@ -444,6 +661,11 @@ curl --fail --silent --max-time 5 http://127.0.0.1:49312/metrics >/dev/null
 sudo docker compose exec -T ha-chatgpt-mcp python -m scripts.production_mcp_verify
 test "$(sudo docker container inspect -f '{{.State.StartedAt}}' homeassistant)" = "$homeassistant_started_before"
 test "$(sudo docker container inspect -f '{{.State.StartedAt}}' caddy)" = "$caddy_started_before"
+if [ "$tunnel_changed" -eq 1 ]; then
+  test "$(sudo docker container inspect -f '{{.Image}}' ha-chatgpt-cloudflared)" = "$desired_tunnel_image_id"
+else
+  test "$(sudo docker container inspect -f '{{.State.StartedAt}}' ha-chatgpt-cloudflared)" = "$prior_tunnel_started"
+fi
 
 stage='validating_runtime_hardening'
 sudo systemctl is-enabled --quiet ha-host-diagnostics.service
@@ -522,6 +744,10 @@ $remoteScript = $remoteScript.Replace(
     '__PUBLIC_MCP_URL__', $PublicMcpUrl.TrimEnd('/')
 ).Replace(
     '__RELEASE_COMMIT__', $releaseCommit
+).Replace(
+    '__OVERLAY_ARCHIVE_NAME__', $overlayArchiveName
+).Replace(
+    '__OVERLAY_SCRIPT_NAME__', $overlayScriptName
 )
 
 try {
@@ -531,6 +757,29 @@ try {
     & $gitExe -C $sourceRoot archive '--format=tar.gz' "--output=$archivePath" $releaseCommit
     if ($LASTEXITCODE -ne 0) { throw 'Could not build the deployment archive.' }
     $archiveSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
+    & $gitExe -C $sourceRoot archive '--format=tar.gz' "--output=$overlayArchivePath" `
+        $releaseCommit 'home_assistant/wyzeapi_overlay'
+    if ($LASTEXITCODE -ne 0) { throw 'Could not build the exact overlay archive.' }
+    $overlayArchiveSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $overlayArchivePath).Hash.ToLowerInvariant()
+    $overlaySource = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'deploy-wyzeapi-overlay.ps1')
+    $overlayMatch = [regex]::Match(
+        $overlaySource,
+        "(?s)\`$remoteScript = @'\r?\n(.*?)\r?\n'@"
+    )
+    if (-not $overlayMatch.Success) { throw 'Could not extract the reviewed overlay remote script.' }
+    $overlayStageBasename = ".wyzeapi-overlay-candidate-$releaseCommit"
+    $renderedOverlayScript = $overlayMatch.Groups[1].Value.Replace(
+        '__RELEASE_COMMIT__', $releaseCommit
+    ).Replace('__ARCHIVE_SHA256__', $overlayArchiveSha).Replace(
+        '__ARCHIVE_NAME__', $overlayArchiveName
+    ).Replace('__SCRIPT_NAME__', $overlayScriptName).Replace(
+        '__STAGE_BASENAME__', $overlayStageBasename
+    )
+    [IO.File]::WriteAllText(
+        $overlayScriptPath,
+        (($renderedOverlayScript -replace "`r`n", "`n") + "`n"),
+        [Text.UTF8Encoding]::new($false)
+    )
     $renderedRemoteScript = $remoteScript.Replace('__ARCHIVE_SHA256__', $archiveSha256)
     [IO.File]::WriteAllText(
         $remoteScriptPath,
@@ -589,6 +838,10 @@ Start-Sleep -Seconds 1200
     if ($LASTEXITCODE -ne 0) { throw 'Could not upload the deployment archive.' }
     & $scpExe @sshOptions $remoteScriptPath "${target}:/tmp/$remoteScriptName"
     if ($LASTEXITCODE -ne 0) { throw 'Could not upload the deployment script.' }
+    & $scpExe @sshOptions $overlayArchivePath "${target}:/tmp/$overlayArchiveName"
+    if ($LASTEXITCODE -ne 0) { throw 'Could not upload the exact overlay archive.' }
+    & $scpExe @sshOptions $overlayScriptPath "${target}:/tmp/$overlayScriptName"
+    if ($LASTEXITCODE -ne 0) { throw 'Could not upload the overlay deployment script.' }
     if ($secretRoot) {
         foreach ($name in $requiredSecrets) {
             & $scpExe @sshOptions (Join-Path $secretRoot $name) "${target}:/tmp/$name"

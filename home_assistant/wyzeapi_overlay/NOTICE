@@ -1,0 +1,14 @@
+Wyze sprinkler Home Assistant overlay
+
+This distribution contains files derived from SecKatie/ha-wyzeapi:
+https://github.com/SecKatie/ha-wyzeapi
+
+The upstream project is licensed under the Apache License, Version 2.0. A copy
+is included as UPSTREAM_LICENSE. The reviewed upstream repository did not
+include a NOTICE file.
+
+Modifications in this overlay add bounded sprinkler coordination, normalized
+and evidence-labelled sprinkler payloads, exact-duration commands, response-only
+Home Assistant services, explicit zone metadata attributes, and related tests
+and deployment guards. Modified files carry SPDX and modification notices where
+their file format permits comments.
