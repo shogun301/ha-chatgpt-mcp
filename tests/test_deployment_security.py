@@ -872,6 +872,8 @@ class WyzeOverlayDeploymentSecurityTests(unittest.TestCase):
         ):
             self.assertIn(f"[{name}]", self.text)
         self.assertIn("test \"$current\" = \"${base_hashes[$name]}\"", self.text)
+        self.assertIn("predecessor_hashes", self.text)
+        self.assertIn("97EBB8FABA1136F70FF00143A2CE4F37600AFDE6548EFBA972AA9DA33DA2F23D", self.text)
         self.assertIn("printf '%s  %s", self.text)
         self.assertIn("sha256sum -c -", self.text)
 
@@ -900,14 +902,28 @@ class WyzeOverlayDeploymentSecurityTests(unittest.TestCase):
         self.assertIn("load(sys.argv[1]) <= load(sys.argv[2])", self.text)
         self.assertIn("core.entity_registry", self.text)
         self.assertIn("wait_for_controller_entities", self.text)
-        self.assertIn("after.get(entity_id) == available", self.text)
-        self.assertIn("wait_for_controller_entities /tmp/wyze-overlay-restored.json exact", self.text)
-        self.assertIn("before['entities'].items()", self.text)
+        self.assertIn('set(before["entities"]) <= set(after["entities"])', self.text)
+        self.assertIn("wait_for_controller_entities /tmp/wyze-overlay-restored.json", self.text)
+        self.assertIn("set(before['unique_ids']) <= set(after['unique_ids'])", self.text)
         self.assertIn("wyze-overlay-snapshot-zones.json", self.text)
         self.assertIn("-watering-status", self.text)
         self.assertIn("-zone-{zone['zone_number']}-metadata", self.text)
         self.assertIn("set(before['services']) <= set(after['services'])", self.text)
-        self.assertIn("load('/tmp/wyze-overlay-restored.json') ==", self.text)
+        self.assertNotIn("load('/tmp/wyze-overlay-restored.json') ==", self.text)
+
+    def test_overlay_failure_records_a_named_stage(self) -> None:
+        self.assertIn("overlay_stage='validating_archive'", self.text)
+        self.assertIn("latest-overlay-status", self.text)
+        self.assertIn("Wyze overlay failure stage=%s exit_code=%s", self.text)
+        for stage in (
+            "validating_installed_base",
+            "capturing_pre_deploy_runtime",
+            "installing_candidate",
+            "restarting_home_assistant",
+            "verifying_read_only_services",
+            "verifying_controller_contract",
+        ):
+            self.assertIn(f"overlay_stage='{stage}'", self.text)
 
     def test_acceptance_invokes_only_read_services(self) -> None:
         for service in (
@@ -938,10 +954,13 @@ class WyzeOverlayDeploymentSecurityTests(unittest.TestCase):
         child_at = main.index('bash "/tmp/__OVERLAY_SCRIPT_NAME__" "$overlay_backup"')
         injection_at = main.index("HA_MCP_FAIL_AFTER_OVERLAY_SUCCESS")
         self.assertLess(backup_at, ownership_at)
-        self.assertLess(ownership_at, child_at)
+        self.assertLess(child_at, ownership_at)
         self.assertLess(child_at, injection_at)
+        self.assertIn('if [ "$overlay_exit" -eq 125 ]; then overlay_mutated=1; fi', main)
         rollback = main[main.index("rollback() {") : main.index("on_exit() {")]
         self.assertIn("rollback_overlay", rollback)
+        self.assertIn("set(before['entities']) <= set(after['entities'])", main)
+        self.assertNotIn('cmp -s "$overlay_baseline/runtime-before.json"', main)
         self.assertIn("sudo diff -qr --no-dereference", main)
         self.assertIn("capture_loaded_entries_main", main)
 

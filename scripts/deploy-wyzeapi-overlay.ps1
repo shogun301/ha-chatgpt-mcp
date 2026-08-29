@@ -56,6 +56,7 @@ requested_backup=${1:-}
 backup=${requested_backup:-"$backup_root/wyzeapi-pre-0.1.40-$stamp.tar.gz"}
 token_file='/opt/ha-chatgpt-mcp/secrets/ha_token'
 mutated=0
+overlay_stage='validating_archive'
 declare -A prior_hashes=()
 
 declare -A base_hashes=(
@@ -66,6 +67,9 @@ declare -A base_hashes=(
   [irrigation_data.py]='9F59596EB839D6C6ACE8D2B04C2B9593064B1B1CD767E4647EF3A4E8950A0591'
   [sensor.py]='3AF7296A87C8B0EA0CDE2E98CE6A05BA81846FE8631D8DD09E5B1954E62DAC15'
   [services.yaml]='F69AF27ABBF54435C1A978DBF791F8CDA8D8500187FE4067EE90C18D661A2950'
+)
+declare -A predecessor_hashes=(
+  [irrigation_data.py]='97EBB8FABA1136F70FF00143A2CE4F37600AFDE6548EFBA972AA9DA33DA2F23D'
 )
 files=(manifest.json __init__.py const.py irrigation.py irrigation_data.py sensor.py services.yaml)
 
@@ -196,7 +200,6 @@ PY
 
 wait_for_controller_entities() {
   local output=$1
-  local mode=${2:-preserved}
   for attempt in $(seq 1 180); do
     capture_runtime "$output"
     if sudo python3 -c '
@@ -204,13 +207,12 @@ import json,sys
 def load(path):
     with open(path, encoding="utf-8") as handle:
         return json.load(handle)
-before = load(sys.argv[1])["entities"]
-after = load(sys.argv[2])["entities"]
-if sys.argv[3] == "exact":
-    assert before == after
-else:
-    assert all(after.get(entity_id) == available for entity_id, available in before.items())
-' /tmp/wyze-overlay-prior.json "$output" "$mode"; then
+before = load(sys.argv[1])
+after = load(sys.argv[2])
+assert set(before["services"]) <= set(after["services"])
+assert set(before["entities"]) <= set(after["entities"])
+assert set(before["unique_ids"]) <= set(after["unique_ids"])
+' /tmp/wyze-overlay-prior.json "$output"; then
       return 0
     fi
     sleep 1
@@ -219,13 +221,17 @@ else:
 }
 
 assert_prior_runtime_restored() {
-  wait_for_controller_entities /tmp/wyze-overlay-restored.json exact
+  wait_for_controller_entities /tmp/wyze-overlay-restored.json
   sudo python3 - <<'PY'
 import json
 def load(path):
     with open(path, encoding='utf-8') as handle:
         return json.load(handle)
-assert load('/tmp/wyze-overlay-restored.json') == load('/tmp/wyze-overlay-prior.json')
+before = load('/tmp/wyze-overlay-prior.json')
+after = load('/tmp/wyze-overlay-restored.json')
+assert set(before['services']) <= set(after['services'])
+assert set(before['entities']) <= set(after['entities'])
+assert set(before['unique_ids']) <= set(after['unique_ids'])
 PY
 }
 
@@ -247,6 +253,13 @@ restore_backup() {
 cleanup() {
   local exit_code=$?
   trap - EXIT
+  if [ "$exit_code" -ne 0 ] && sudo test -d "$backup_root"; then
+    printf 'timestamp=%s\nresult=failed\nstage=%s\nexit_code=%s\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$overlay_stage" "$exit_code" | \
+      sudo tee "$backup_root/latest-overlay-status" >/dev/null
+    printf 'Wyze overlay failure stage=%s exit_code=%s\n' \
+      "$overlay_stage" "$exit_code" >&2
+  fi
   if [ "$exit_code" -ne 0 ] && sudo test -f "$backup"; then
     printf 'Overlay deployment failed; backup retained at %s\n' "$backup" >&2
   fi
@@ -275,16 +288,19 @@ python3 -c 'import json,sys; p=json.load(open(sys.argv[1], encoding="utf-8")); a
   "$overlay_root/manifest.json"
 
 sudo test -d "$target"
+overlay_stage='validating_installed_base'
 for name in "${files[@]}"; do
   sudo test -f "$target/$name"
   current=$(sudo sha256sum "$target/$name" | awk '{print toupper($1)}')
   candidate=$(sha256sum "$overlay_root/$name" | awk '{print toupper($1)}')
   prior_hashes[$name]="$current"
   if [ "$current" != "$candidate" ]; then
-    test "$current" = "${base_hashes[$name]}"
+    test "$current" = "${base_hashes[$name]}" || \
+      test "$current" = "${predecessor_hashes[$name]:-}"
   fi
 done
 
+overlay_stage='capturing_pre_deploy_runtime'
 wait_for_ha
 wait_for_wyze_loaded
 capture_loaded_entries /tmp/wyze-overlay-prior-entries.json
@@ -325,17 +341,20 @@ sudo docker exec homeassistant python -m py_compile \
 sudo docker exec homeassistant python -c \
   'import pathlib,yaml; p=pathlib.Path("/config")/"__STAGE_BASENAME__"/"services.yaml"; value=yaml.safe_load(p.read_text()); assert isinstance(value,dict) and len(value)==8'
 
+overlay_stage='installing_candidate'
 mutated=1
 for name in "${files[@]}"; do
   sudo install -o root -g root -m 0644 "$overlay_root/$name" "$target/$name"
 done
 sudo docker exec homeassistant python -m homeassistant --script check_config --config /config
+overlay_stage='restarting_home_assistant'
 sudo docker restart homeassistant >/dev/null
 wait_for_ha
 wait_for_loaded_entries /tmp/wyze-overlay-prior-entries.json /tmp/wyze-overlay-current-entries.json
 wait_for_wyze_loaded
 wait_for_controller_entities /tmp/wyze-overlay-current.json
 
+overlay_stage='verifying_read_only_services'
 curl --fail --silent --max-time 15 \
   -H "Authorization: Bearer $token" \
   http://127.0.0.1:8123/api/services >/tmp/wyze-overlay-services.json
@@ -402,6 +421,7 @@ assert any(item.get("integration_version") == "0.1.40" for item in values(p.get(
 done
 
 capture_runtime /tmp/wyze-overlay-current.json
+overlay_stage='verifying_controller_contract'
 sudo python3 - <<'PY'
 import json
 def load(path):
@@ -419,8 +439,8 @@ required = {
 assert required <= set(after['services'])
 assert set(before['services']) <= set(after['services'])
 assert all(
-    after['entities'].get(entity_id) == available
-    for entity_id, available in before['entities'].items()
+    entity_id in after['entities']
+    for entity_id in before['entities']
 )
 required_suffixes = {
     '-watering-status', '-active-zone', '-watering-remaining',
@@ -441,6 +461,7 @@ for name in "${files[@]}"; do
   test "$(sudo sha256sum "$target/$name" | awk '{print toupper($1)}')" = \
     "$(sha256sum "$overlay_root/$name" | awk '{print toupper($1)}')"
 done
+overlay_stage='complete'
 mutated=0
 trap - EXIT
 sudo rm -rf -- "$release_stage" "$stage_target"

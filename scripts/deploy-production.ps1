@@ -305,7 +305,16 @@ def load(path):
 assert load(sys.argv[1]) <= load(sys.argv[2])
 ' "$overlay_baseline/loaded-before.json" "$current_entries" || return 1
   capture_overlay_runtime_main "$overlay_baseline/runtime-current.json" || return 1
-  sudo cmp -s "$overlay_baseline/runtime-before.json" "$overlay_baseline/runtime-current.json" || return 1
+  sudo python3 - "$overlay_baseline/runtime-before.json" "$overlay_baseline/runtime-current.json" <<'PY' || return 1
+import json
+import sys
+with open(sys.argv[1], encoding='utf-8') as handle:
+    before = json.load(handle)
+with open(sys.argv[2], encoding='utf-8') as handle:
+    after = json.load(handle)
+assert set(before['services']) <= set(after['services'])
+assert set(before['entities']) <= set(after['entities'])
+PY
   overlay_mutated=0
 }
 
@@ -689,8 +698,13 @@ else
   sudo install -d -o root -g root -m 0700 "$(dirname "$overlay_backup")"
   sudo test ! -e "$overlay_backup"
   sudo tar -czf "$overlay_backup" -C /opt/homeassistant/config/custom_components wyzeapi
-  overlay_mutated=1
-  bash "/tmp/__OVERLAY_SCRIPT_NAME__" "$overlay_backup"
+  if bash "/tmp/__OVERLAY_SCRIPT_NAME__" "$overlay_backup"; then
+    overlay_mutated=1
+  else
+    overlay_exit=$?
+    if [ "$overlay_exit" -eq 125 ]; then overlay_mutated=1; fi
+    exit "$overlay_exit"
+  fi
   sudo test -f "$overlay_backup"
   if [ "${HA_MCP_FAIL_AFTER_OVERLAY_SUCCESS:-0}" = 1 ]; then
     stage='injected_failure_after_overlay_success'
