@@ -8,7 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH="/app/.venv/bin:$PATH"
 
 LABEL org.opencontainers.image.source="https://github.com/shogun301/ha-chatgpt-mcp" \
-      org.opencontainers.image.version="2.7.1" \
+      org.opencontainers.image.version="2.7.2" \
       org.opencontainers.image.revision="${VCS_REF}"
 
 RUN useradd --system --uid 10001 --create-home --home-dir /app mcp

@@ -480,6 +480,8 @@ class SprinklerContractTests(unittest.TestCase):
                         {
                             "zone_number": 2,
                             "started_at": (now - timedelta(minutes=2)).isoformat(),
+                            "source": "unknown",
+                            "source_evidence_type": "controller-reported",
                         }
                     ]
                 },
@@ -511,6 +513,7 @@ class SprinklerContractTests(unittest.TestCase):
         self.assertIsNone(unknown.run_id)
         self.assertEqual(unknown.source, "unknown")
         self.assertFalse(unknown.source_supported)
+        self.assertIsNone(unknown.source_evidence)
         self.assertEqual(unknown.outcome, "unknown")
         self.assertFalse(unknown.outcome_supported)
         self.assertIsNone(unknown.outcome_evidence)

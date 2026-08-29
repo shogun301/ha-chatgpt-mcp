@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.7.2 - 2026-08-29
+
+- Treat upstream history source sentinels such as `unknown`, `unavailable`, and
+  `unsupported` as explicit unsupported values with no evidence, matching the
+  typed Gantt contract and live Wyze recorder payloads.
+
 ## 2.7.1 - 2026-08-29
 
 - Made the two vacuum-room tool schemas independent of the private configured

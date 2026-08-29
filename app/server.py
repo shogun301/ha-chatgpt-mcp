@@ -102,7 +102,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 LOGGER = logging.getLogger("ha_chatgpt_mcp")
-SERVER_VERSION = "2.7.1"
+SERVER_VERSION = "2.7.2"
 audit = AuditLog(config.AUDIT_LOG_PATH)
 oauth = OAuthServer(
     OAuthStore(config.DATABASE_PATH),
@@ -4235,7 +4235,17 @@ def _run_intervals(
             source_value = _first(
                 zone_run, "source", "run_source", "trigger_type"
             ) or _first(run, "source", "run_source", "trigger_type")
-            source_supported = source_value is not None
+            source_text = (
+                str(source_value).strip() if source_value is not None else ""
+            )
+            source_supported = source_text.casefold() not in {
+                "",
+                "none",
+                "null",
+                "unknown",
+                "unavailable",
+                "unsupported",
+            }
             source_evidence = (
                 _state_evidence(
                     zone_run.get("source_evidence_type")
@@ -4323,7 +4333,7 @@ def _run_intervals(
                     duration_evidence=duration_evidence,
                     commanded_duration_seconds=commanded,
                     commanded_duration_evidence=commanded_evidence,
-                    source=str(source_value or "unknown"),
+                    source=source_text if source_supported else "unknown",
                     source_supported=source_supported,
                     source_evidence=source_evidence,
                     outcome=outcome,
