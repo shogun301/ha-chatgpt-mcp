@@ -289,6 +289,19 @@ class ComposeDeploymentSecurityTests(unittest.TestCase):
             r"(?mi)^\s*(?:CMD|ENTRYPOINT)\b[^\n]*127\.0\.0\.1[^\n]*8000",
         )
 
+    def test_every_dockerfile_copy_source_exists(self) -> None:
+        for raw_line in DOCKERFILE.read_text(encoding="utf-8").splitlines():
+            if not re.match(r"(?i)^\s*COPY\s+", raw_line):
+                continue
+            tokens = shlex.split(raw_line, comments=True)
+            self.assertGreaterEqual(len(tokens), 3)
+            for source in tokens[1:-1]:
+                with self.subTest(source=source):
+                    self.assertTrue(
+                        (ROOT / source).exists(),
+                        f"Dockerfile COPY source does not exist: {source}",
+                    )
+
 
 class CollectorUnitSecurityTests(unittest.TestCase):
     @classmethod

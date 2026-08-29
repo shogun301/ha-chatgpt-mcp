@@ -10,7 +10,7 @@ WORKDIR /app
 COPY pyproject.toml ./
 COPY app ./app
 COPY tests ./tests
-COPY scripts/production_verify.py scripts/production_mcp_verify.py ./scripts/
+COPY scripts/production_mcp_verify.py ./scripts/
 RUN pip install --upgrade pip && pip install .
 
 USER 10001:10001
