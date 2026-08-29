@@ -459,7 +459,7 @@ class DeploymentScriptSecurityTests(unittest.TestCase):
             self.text.index("stage='validating_fixed_routes'") :
             self.text.index("stage='validating_runtime_hardening'")
         ]
-        self.assertIn("for attempt in $(seq 1 30)", fixed)
+        self.assertIn("for attempt in $(seq 1 180)", fixed)
         self.assertIn('p.get("service_version") == "2.7.3"', fixed)
         self.assertIn('[ "$fixed_routes_ready" -eq 1 ]', fixed)
 
@@ -961,6 +961,8 @@ class WyzeOverlayDeploymentSecurityTests(unittest.TestCase):
         self.assertIn("rollback_overlay", rollback)
         self.assertIn("set(before['entities']) <= set(after['entities'])", main)
         self.assertNotIn('cmp -s "$overlay_baseline/runtime-before.json"', main)
+        self.assertIn("runtime_restored=0", main)
+        self.assertIn("[ \"$runtime_restored\" -eq 1 ]", main)
         self.assertIn("sudo diff -qr --no-dereference", main)
         self.assertIn("capture_loaded_entries_main", main)
 

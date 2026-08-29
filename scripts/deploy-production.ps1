@@ -304,8 +304,10 @@ def load(path):
     with open(path, encoding="utf-8") as handle: return set(json.load(handle))
 assert load(sys.argv[1]) <= load(sys.argv[2])
 ' "$overlay_baseline/loaded-before.json" "$current_entries" || return 1
-  capture_overlay_runtime_main "$overlay_baseline/runtime-current.json" || return 1
-  sudo python3 - "$overlay_baseline/runtime-before.json" "$overlay_baseline/runtime-current.json" <<'PY' || return 1
+  local runtime_restored=0
+  for attempt in $(seq 1 180); do
+    if capture_overlay_runtime_main "$overlay_baseline/runtime-current.json" && \
+       sudo python3 - "$overlay_baseline/runtime-before.json" "$overlay_baseline/runtime-current.json" <<'PY'
 import json
 import sys
 with open(sys.argv[1], encoding='utf-8') as handle:
@@ -315,6 +317,13 @@ with open(sys.argv[2], encoding='utf-8') as handle:
 assert set(before['services']) <= set(after['services'])
 assert set(before['entities']) <= set(after['entities'])
 PY
+    then
+      runtime_restored=1
+      break
+    fi
+    sleep 1 || return 1
+  done
+  [ "$runtime_restored" -eq 1 ] || return 1
   overlay_mutated=0
 }
 
@@ -744,7 +753,7 @@ rm -f /tmp/ha-mcp-health.json
 curl --fail --silent --max-time 5 http://127.0.0.1:8123/ >/dev/null
 stage='validating_fixed_routes'
 fixed_routes_ready=0
-for attempt in $(seq 1 30); do
+for attempt in $(seq 1 180); do
   ha_public_status=$(curl --silent --output /dev/null --max-time 10 --write-out '%{http_code}' __PUBLIC_FRONTEND_URL__/ || true)
   case "$ha_public_status" in
     200|302|403)
