@@ -9,7 +9,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$releaseVersion = '2.7.0'
+$releaseVersion = '2.7.1'
 $sourceRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $secretRoot = if ($SecretStagingPath) { [IO.Path]::GetFullPath($SecretStagingPath) } else { $null }
 $requiredSecrets = @(
@@ -101,10 +101,10 @@ set -Eeuo pipefail
 set +x
 umask 077
 
-release_version='2.7.0'
+release_version='2.7.1'
 release_commit='__RELEASE_COMMIT__'
 archive_sha256='__ARCHIVE_SHA256__'
-archive_path='/tmp/ha-chatgpt-mcp-2.7.0.tar.gz'
+archive_path='/tmp/ha-chatgpt-mcp-2.7.1.tar.gz'
 candidate_tag="ha-chatgpt-mcp:candidate-$release_commit"
 release_stage=$(mktemp -d /tmp/ha-mcp-release.XXXXXX)
 app_root='/opt/ha-chatgpt-mcp'
@@ -177,7 +177,8 @@ cleanup_staging() {
   sudo rm -rf -- "$release_stage"
   sudo rm -rf -- "$overlay_baseline"
   sudo rm -f -- "$archive_path" "/tmp/ha-chatgpt-mcp-deploy-$release_version.sh" \
-    "/tmp/__OVERLAY_ARCHIVE_NAME__" "/tmp/__OVERLAY_SCRIPT_NAME__"
+    "/tmp/__OVERLAY_ARCHIVE_NAME__" "/tmp/__OVERLAY_SCRIPT_NAME__" \
+    /tmp/ha-mcp-rollback-health.json
   for secret_name in solaredge_client_id solaredge_client_secret solaredge_token_key solaredge_bridge_secret; do
     sudo rm -f -- "/tmp/$secret_name"
   done
@@ -307,14 +308,33 @@ rollback() {
   if [ "$collector_changed" -eq 1 ]; then
     sudo systemctl stop ha-host-diagnostics.service >/dev/null 2>&1 || rollback_failed=1
   fi
-  if [ -f "$app_backup" ]; then
+  rollback_app() {
+    sudo test -f "$app_backup" || return 1
+    sudo tar -tzf "$app_backup" >/dev/null || return 1
     sudo find "$app_root" -mindepth 1 -maxdepth 1 \
       ! -name secrets ! -name data ! -name logs ! -name backups \
-      -exec rm -rf -- {} + || rollback_failed=1
-    sudo tar -xzf "$app_backup" -C "$app_root" || rollback_failed=1
-  else
-    rollback_failed=1
-  fi
+      -exec rm -rf -- {} + || return 1
+    sudo tar -xzf "$app_backup" -C "$app_root" || return 1
+    sudo test -f "$app_root/docker-compose.yml" || return 1
+    [ -n "$prior_image_id" ] || return 1
+    [ -n "$prior_image_ref" ] || return 1
+    sudo docker image tag "$rollback_tag" "$prior_image_ref" || return 1
+    cd "$app_root" || return 1
+    sudo docker compose config --quiet || return 1
+    sudo docker compose config --images | grep -Fx "$prior_image_ref" >/dev/null || return 1
+    sudo docker compose up -d --no-deps --force-recreate ha-chatgpt-mcp >/dev/null 2>&1 || return 1
+    restored_image_id=$(sudo docker container inspect -f '{{.Image}}' ha-chatgpt-mcp 2>/dev/null) || return 1
+    [ "$restored_image_id" = "$prior_image_id" ] || return 1
+    for rollback_attempt in $(seq 1 30); do
+      if curl --fail --silent --max-time 5 http://127.0.0.1:8000/healthz >/tmp/ha-mcp-rollback-health.json; then
+        break
+      fi
+      sleep 1
+    done
+    curl --fail --silent --max-time 5 http://127.0.0.1:8000/healthz >/tmp/ha-mcp-rollback-health.json || return 1
+    python3 -c 'import json; p=json.load(open("/tmp/ha-mcp-rollback-health.json", encoding="utf-8")); assert p.get("status") == "ok"' || return 1
+  }
+  rollback_app || rollback_failed=1
   if [ "$collector_changed" -eq 1 ]; then
     if [ "$collector_existed" -eq 1 ]; then
       if [ -f "$collector_backup" ]; then
@@ -349,22 +369,10 @@ rollback() {
       sudo systemctl disable ha-host-diagnostics.service >/dev/null 2>&1 || rollback_failed=1
     fi
   fi
-  if [ -n "$prior_image_id" ] && [ -n "$prior_image_ref" ]; then
-    sudo docker image tag "$rollback_tag" "$prior_image_ref" || rollback_failed=1
-  fi
-  if [ -f "$app_root/docker-compose.yml" ]; then
-    cd "$app_root"
-    sudo docker compose up -d --no-deps --force-recreate ha-chatgpt-mcp >/dev/null 2>&1 || rollback_failed=1
-    if [ "$tunnel_changed" -eq 1 ]; then
-      sudo docker image tag "$tunnel_rollback_tag" "$prior_tunnel_image_ref" || rollback_failed=1
-      sudo docker compose up -d --no-deps --force-recreate cloudflared >/dev/null 2>&1 || rollback_failed=1
-    fi
-  else
-    rollback_failed=1
-  fi
-  if [ -n "$prior_image_id" ]; then
-    restored_image_id=$(sudo docker container inspect -f '{{.Image}}' ha-chatgpt-mcp 2>/dev/null || true)
-    [ "$restored_image_id" = "$prior_image_id" ] || rollback_failed=1
+  if [ "$tunnel_changed" -eq 1 ]; then
+    sudo docker image tag "$tunnel_rollback_tag" "$prior_tunnel_image_ref" || rollback_failed=1
+    cd "$app_root" || rollback_failed=1
+    sudo docker compose up -d --no-deps --force-recreate cloudflared >/dev/null 2>&1 || rollback_failed=1
   fi
   if [ "$tunnel_changed" -eq 1 ]; then
     [ "$(sudo docker container inspect -f '{{.Image}}' ha-chatgpt-cloudflared 2>/dev/null || true)" = "$prior_tunnel_image_id" ] || rollback_failed=1
@@ -646,7 +654,7 @@ with open('/tmp/ha-mcp-health.json', encoding='utf-8') as handle:
     payload = json.load(handle)
 assert payload.get('status') == 'ok'
 assert payload.get('home_assistant', {}).get('reachable') is True
-assert payload.get('service_version') == '2.7.0'
+assert payload.get('service_version') == '2.7.1'
 PY
 rm -f /tmp/ha-mcp-health.json
 curl --fail --silent --max-time 5 http://127.0.0.1:8123/ >/dev/null

@@ -102,7 +102,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 LOGGER = logging.getLogger("ha_chatgpt_mcp")
-SERVER_VERSION = "2.7.0"
+SERVER_VERSION = "2.7.1"
 audit = AuditLog(config.AUDIT_LOG_PATH)
 oauth = OAuthServer(
     OAuthStore(config.DATABASE_PATH),
@@ -3061,8 +3061,9 @@ async def control_vacuum(
 
 
 @mcp.tool(title="List vacuum rooms", annotations=READ)
-async def list_vacuum_rooms(entity_id: str = config.DEFAULT_VACUUM_ENTITY) -> dict[str, Any]:
+async def list_vacuum_rooms(entity_id: str | None = None) -> dict[str, Any]:
     """List named rooms/segments currently advertised by one exact vacuum."""
+    entity_id = entity_id or config.DEFAULT_VACUUM_ENTITY
     validate_entity_id(entity_id)
     if not entity_id.startswith("vacuum."):
         raise ValueError("entity_id must be a vacuum entity")
@@ -3133,12 +3134,13 @@ async def list_vacuum_rooms(entity_id: str = config.DEFAULT_VACUUM_ENTITY) -> di
 @mcp.tool(title="Clean vacuum rooms", annotations=WRITE)
 async def clean_vacuum_rooms(
     room_ids: Annotated[list[int] | None, Field(min_length=1, max_length=12)] = None,
-    entity_id: str = config.DEFAULT_VACUUM_ENTITY,
+    entity_id: str | None = None,
     room_names: Annotated[list[str] | None, Field(min_length=1, max_length=12)] = None,
     repeats: Annotated[int, Field(ge=1, le=3)] = 1,
 ) -> dict[str, Any]:
     """Start cleaning advertised rooms by exact ID or case-insensitive exact name."""
     _require_write()
+    entity_id = entity_id or config.DEFAULT_VACUUM_ENTITY
     room_summary = await list_vacuum_rooms(entity_id)
     allowed = {
         int(item["id"])

@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.7.1 - 2026-08-29
+
+- Made the two vacuum-room tool schemas independent of the private configured
+  vacuum entity while preserving the configured runtime default. This keeps
+  the exact public registry contract deterministic across deployment hosts.
+- Hardened MCP rollback into one fail-closed application restore that validates
+  the backup archive, prior image reference, Compose configuration, recreated
+  container image, and health endpoint before reporting success.
+
 ## 2.7.0 - 2026-08-29
 
 - Added eight typed sprinkler tools for capability discovery, separated command

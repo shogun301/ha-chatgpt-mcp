@@ -36,9 +36,9 @@ DIAGNOSTIC_TOOLS = (
     "probe_lan_node",
 )
 LAN_PROBE_SERVICES = ("dns", "router_ssh")
-EXPECTED_VERSION = "2.7.0"
+EXPECTED_VERSION = "2.7.1"
 EXPECTED_TOOL_COUNT = 107
-CONTRACT_PATH = Path("/app/tests/fixtures/server-contract-2.7.0.json")
+CONTRACT_PATH = Path("/app/tests/fixtures/server-contract-2.7.1.json")
 NEW_CAPABILITY_TOOLS = {
     "get_capability_sync_status",
     "get_calendar_events",

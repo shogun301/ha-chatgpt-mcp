@@ -384,12 +384,12 @@ class DeploymentScriptSecurityTests(unittest.TestCase):
             if re.match(r"^\s*(?:sudo\s+)?install\b", line):
                 cls.install_commands.append(shlex.split(line.strip(), posix=True))
 
-    def test_release_is_pinned_to_2_7_0(self) -> None:
+    def test_release_is_pinned_to_2_7_1(self) -> None:
         self.assertRegex(
             self.text,
-            r"(?m)^\s*\$releaseVersion\s*=\s*['\"]2\.7\.0['\"]\s*$",
+            r"(?m)^\s*\$releaseVersion\s*=\s*['\"]2\.7\.1['\"]\s*$",
         )
-        self.assertRegex(self.text, r"(?m)^\s*release_version=['\"]2\.7\.0['\"]\s*$")
+        self.assertRegex(self.text, r"(?m)^\s*release_version=['\"]2\.7\.1['\"]\s*$")
 
     def test_tests_run_before_main_container_recreation(self) -> None:
         main = self.text[
@@ -476,6 +476,18 @@ class DeploymentScriptSecurityTests(unittest.TestCase):
         ]
         self.assertIn("restored_image_id=$(sudo docker container inspect", rollback)
         self.assertIn('[ "$restored_image_id" = "$prior_image_id" ]', rollback)
+        self.assertIn("rollback_app || rollback_failed=1", rollback)
+        self.assertIn('sudo tar -tzf "$app_backup" >/dev/null || return 1', rollback)
+        self.assertIn(
+            'sudo docker compose config --images | grep -Fx "$prior_image_ref" >/dev/null || return 1',
+            rollback,
+        )
+        self.assertIn(
+            "sudo docker compose up -d --no-deps --force-recreate ha-chatgpt-mcp >/dev/null 2>&1 || return 1",
+            rollback,
+        )
+        self.assertIn("/tmp/ha-mcp-rollback-health.json", rollback)
+        self.assertIn('p.get("status") == "ok"', rollback)
         self.assertIn("stage='rollback_failed'", rollback)
         self.assertIn("record_status rollback_failed", rollback)
         self.assertIn("record_status rolled_back", rollback)

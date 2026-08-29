@@ -221,7 +221,7 @@ class ProductionVerifierSchemaTests(unittest.IsolatedAsyncioTestCase):
     async def test_all_production_verifier_requests_match_advertised_schemas(self) -> None:
         tools = {tool.name: tool for tool in await mcp.list_tools()}
         contract = json.loads(
-            Path("tests/fixtures/server-contract-2.7.0.json").read_text(encoding="utf-8")
+            Path("tests/fixtures/server-contract-2.7.1.json").read_text(encoding="utf-8")
         )
         self.assertEqual(EXPECTED_VERSION, SERVER_VERSION)
         self.assertEqual(EXPECTED_TOOL_COUNT, len(tools))
@@ -256,6 +256,11 @@ class ProductionVerifierSchemaTests(unittest.IsolatedAsyncioTestCase):
             contract["generic_service_allowlist"],
             {domain: sorted(services) for domain, services in ALLOWED_SERVICES.items()},
         )
+        for name in ("list_vacuum_rooms", "clean_vacuum_rooms"):
+            self.assertIsNone(
+                tools[name].input_schema["properties"]["entity_id"].get("default"),
+                f"{name} must not expose an environment-specific entity default",
+            )
         self.assertTrue(NEW_CAPABILITY_TOOLS.issubset(tools))
         self.assertEqual(set(DIAGNOSTIC_TOOLS), set(DIAGNOSTIC_REQUESTS))
         requests = {
