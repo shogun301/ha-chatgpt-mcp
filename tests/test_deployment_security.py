@@ -389,7 +389,9 @@ class DeploymentScriptSecurityTests(unittest.TestCase):
             self.text.index("mutated=1") : self.text.index("record_marker completed")
         ]
         test = re.search(
-            r"docker\s+compose\s+run\b[^\r\n]*(?:unittest|pytest)", main, re.I
+            r"docker\s+run\b[^\r\n]*--network\s+none\b[\s\S]*?(?:unittest|pytest)",
+            main,
+            re.I,
         )
         recreate = re.search(
             r"(?m)^[^\r\n]*docker\s+compose\s+up\b[^\r\n]*--force-recreate\b[^\r\n]*$",
@@ -403,6 +405,8 @@ class DeploymentScriptSecurityTests(unittest.TestCase):
             recreate, "deployment must use an explicit bounded recreation"
         )
         self.assertLess(test.start(), recreate.start())
+        self.assertRegex(test.group(0), r"--entrypoint\s+python\b")
+        self.assertNotRegex(test.group(0), r"docker\s+compose\s+run\b")
         self.assertRegex(recreate.group(0), r"\bha-chatgpt-mcp\b")
         self.assertNotRegex(recreate.group(0), r"(?:^|\s)homeassistant(?:\s|$)")
 

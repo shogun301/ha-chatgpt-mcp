@@ -251,7 +251,8 @@ sudo /usr/bin/python3 -m unittest tests.test_deployment_security -v
 stage='building_mcp_image'
 sudo docker build -t "ha-chatgpt-mcp:$release_version" .
 stage='running_release_tests'
-sudo docker compose run --rm --no-deps ha-chatgpt-mcp python -m unittest discover -s tests -v
+sudo docker run --rm --network none --entrypoint python \
+  "ha-chatgpt-mcp:$release_version" -m unittest discover -s tests -v
 stage='recreating_mcp_and_tunnel'
 sudo docker compose up -d --no-deps --force-recreate ha-chatgpt-mcp cloudflared
 
