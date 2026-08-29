@@ -151,13 +151,14 @@ overlay_target='/opt/homeassistant/config/custom_components/wyzeapi'
 homeassistant_started_before=''
 caddy_started_before=''
 stage='initializing'
+failed_stage=''
 status_file="$backup_root/latest-deploy-status"
 
 record_status() {
   local result=$1
   sudo install -d -o root -g root -m 0700 "$backup_root"
-  printf 'timestamp=%s\nresult=%s\nstage=%s\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$result" "$stage" | \
+  printf 'timestamp=%s\nresult=%s\nstage=%s\nfailed_stage=%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$result" "$stage" "$failed_stage" | \
     sudo tee "$status_file" >/dev/null
   sudo chown root:root "$status_file"
   sudo chmod 0600 "$status_file"
@@ -431,6 +432,8 @@ on_exit() {
   local rollback_exit=0
   trap - EXIT
   if [ "$exit_code" -ne 0 ] && [ "$mutated" -eq 1 ]; then
+    failed_stage="$stage"
+    printf 'Production release failed at stage=%s; starting rollback.\n' "$failed_stage" >&2
     record_status failed
     rollback || rollback_exit=$?
   fi
@@ -935,15 +938,12 @@ Start-Sleep -Seconds 1200
     try {
         $ErrorActionPreference = 'Continue'
         $PSNativeCommandUseErrorActionPreference = $false
-        $remoteOutput = & $sshExe @sshOptions $target "bash /tmp/$remoteScriptName" 2>&1
+        & $sshExe @sshOptions $target "bash /tmp/$remoteScriptName" 2>&1
         $remoteExitCode = $LASTEXITCODE
     }
     finally {
         $ErrorActionPreference = $priorErrorActionPreference
         $PSNativeCommandUseErrorActionPreference = $priorNativeErrorPreference
-    }
-    foreach ($line in $remoteOutput) {
-        [Console]::Out.WriteLine([string]$line)
     }
     if ($remoteExitCode -ne 0) { throw 'Production deployment failed and the remote rollback was invoked.' }
 }

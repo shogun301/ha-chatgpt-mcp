@@ -445,6 +445,12 @@ class DeploymentScriptSecurityTests(unittest.TestCase):
         self.assertIn("candidate_overlay=", block)
         self.assertNotIn("docker restart homeassistant", block)
 
+    def test_failure_stage_survives_rollback_and_output_is_streamed(self) -> None:
+        self.assertIn('failed_stage="$stage"', self.text)
+        self.assertIn('failed_stage=%s', self.text)
+        self.assertNotIn('$remoteOutput = & $sshExe', self.text)
+        self.assertNotIn('foreach ($line in $remoteOutput)', self.text)
+
     def test_protected_ha_route_accepts_only_expected_access_responses(self) -> None:
         self.assertIn("ha_public_status=$(curl", self.text)
         self.assertIn("200|302|403", self.text)

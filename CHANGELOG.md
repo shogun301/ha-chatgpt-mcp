@@ -6,6 +6,7 @@
 - Include the exact tool name in production verifier sanitization failures so rollback evidence is actionable.
 - Add a live, read-only candidate sidecar preflight that must pass before any MCP release mutation; `-PreflightOnly` runs it without requiring GitHub publication or deploying a service.
 - Permit reuse of an already-live Wyze overlay only after byte-for-byte comparison with the candidate, avoiding an unnecessary Home Assistant restart.
+- Stream remote deployment output and preserve the original failure stage through rollback for actionable production evidence.
 
 ## 2.7.2 - 2026-08-29
 
