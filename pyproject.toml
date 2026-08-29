@@ -5,7 +5,7 @@ requires-python = ">=3.12"
 dependencies = [
   "aiohttp>=3.12,<4",
   "argon2-cffi>=25,<26",
-  "cryptography>=45,<46",
+  "cryptography>=50.0.0,<51",
   "mcp>=2.0,<3",
   "PyJWT>=2.10,<3",
   "python-multipart>=0.0.20,<1",
