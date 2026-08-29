@@ -386,7 +386,7 @@ class DeploymentScriptSecurityTests(unittest.TestCase):
 
     def test_tests_run_before_main_container_recreation(self) -> None:
         main = self.text[
-            self.text.index("stage='extracting_clean_release'") : self.text.index("record_marker completed")
+            self.text.index("stage='running_hermetic_release_tests'") : self.text.index("record_marker completed")
         ]
         test = re.search(
             r"docker\s+run\b[^\r\n]*--network\s+none\b[\s\S]*?(?:unittest|pytest)",
@@ -408,16 +408,8 @@ class DeploymentScriptSecurityTests(unittest.TestCase):
         self.assertRegex(
             test.group(0), r"--entrypoint\s+/app/\.venv/bin/python\b"
         )
-        self.assertIn('--volume "$release_root:/release:ro"', test.group(0))
+        self.assertIn('--volume "$release_stage:/release:ro"', test.group(0))
         self.assertRegex(test.group(0), r"--workdir\s+/release\b")
-        readable = re.search(
-            r"chmod\s+-R\s+a\+rX\s+[\"']?\$release_stage[\"']?",
-            main,
-        )
-        self.assertIsNotNone(
-            readable, "the non-root image user must be able to traverse the release archive"
-        )
-        self.assertLess(readable.start(), test.start())
         self.assertNotRegex(test.group(0), r"docker\s+compose\s+run\b")
         self.assertRegex(recreate.group(0), r"\bha-chatgpt-mcp\b")
         self.assertNotRegex(recreate.group(0), r"(?:^|\s)homeassistant(?:\s|$)")
@@ -434,11 +426,17 @@ class DeploymentScriptSecurityTests(unittest.TestCase):
     def test_host_and_exact_image_security_tests_cover_the_release_tree(self) -> None:
         dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
         self.assertNotIn("tests/test_deployment_security.py", dockerignore)
-        host_test_at = self.text.index(
-            "sudo /usr/bin/python3 -m unittest tests.test_deployment_security -v"
-        )
         build_at = self.text.index("sudo docker build --build-arg")
-        self.assertLess(host_test_at, build_at)
+        security_test_at = self.text.index(
+            "/app/.venv/bin/python -m unittest tests.test_deployment_security -v"
+        )
+        full_test_at = self.text.index("stage='running_hermetic_release_tests'")
+        self.assertLess(build_at, security_test_at)
+        self.assertLess(security_test_at, full_test_at)
+        self.assertIn("/app/.venv/bin/python scripts/release_integrity.py --archive", self.text)
+        self.assertIn("/app/.venv/bin/python scripts/public_release_audit.py --archive", self.text)
+        readable_at = self.text.index('sudo chmod -R a+rX "$release_stage"')
+        self.assertLess(readable_at, security_test_at)
         for suite in ("tests", "collector/tests", "home_assistant/tests"):
             self.assertIn(suite, self.text)
 

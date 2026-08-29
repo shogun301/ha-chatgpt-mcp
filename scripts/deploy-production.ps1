@@ -220,10 +220,8 @@ stage='extracting_clean_release'
 printf '%s  %s\n' "$archive_sha256" "$archive_path" | sha256sum -c -
 sudo tar -xzf "$archive_path" -C "$release_stage"
 cd "$release_stage"
-stage='validating_release_integrity'
-sudo /usr/bin/python3 scripts/release_integrity.py --archive
+stage='auditing_clean_release'
 sudo /usr/bin/python3 scripts/public_release_audit.py --archive
-sudo /usr/bin/python3 -m unittest tests.test_deployment_security -v
 sudo chmod -R a+rX "$release_stage"
 stage='building_mcp_image'
 sudo docker build --build-arg "VCS_REF=$release_commit" \
@@ -231,10 +229,20 @@ sudo docker build --build-arg "VCS_REF=$release_commit" \
 test "$(sudo docker image inspect -f '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
   "$candidate_tag")" = "$release_commit"
 tested_image_id=$(sudo docker image inspect -f '{{.Id}}' "$candidate_tag")
+stage='validating_release_integrity'
+sudo docker run --rm --network none --env HOME=/tmp \
+  --env PYTHONDONTWRITEBYTECODE=1 --read-only --tmpfs /tmp \
+  --volume "$release_stage:/release:ro" --workdir /release \
+  --entrypoint sh "$candidate_tag" -c '
+    set -eu
+    /app/.venv/bin/python scripts/release_integrity.py --archive
+    /app/.venv/bin/python scripts/public_release_audit.py --archive
+    /app/.venv/bin/python -m unittest tests.test_deployment_security -v
+  '
 stage='running_hermetic_release_tests'
 sudo docker run --rm --network none --env HOME=/tmp \
   --env PYTHONDONTWRITEBYTECODE=1 --env RELEASE_ARCHIVE=1 \
-  --read-only --tmpfs /tmp --volume "$release_root:/release:ro" \
+  --read-only --tmpfs /tmp --volume "$release_stage:/release:ro" \
   --workdir /release --entrypoint /app/.venv/bin/python \
   "$candidate_tag" \
   -m pytest tests collector/tests home_assistant/tests
