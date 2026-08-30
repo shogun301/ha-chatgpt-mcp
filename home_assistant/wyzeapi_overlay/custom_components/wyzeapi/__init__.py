@@ -36,7 +36,9 @@ from .const import (
     SERVICE_GET_SPRINKLER_SCHEDULE_RUNS,
     SERVICE_GET_SPRINKLER_SCHEDULES,
     SERVICE_GET_SPRINKLER_SNAPSHOT,
+    SERVICE_PAUSE_SPRINKLER,
     SERVICE_REFRESH_SPRINKLER,
+    SERVICE_RESUME_SPRINKLER,
     SERVICE_RUN_SPRINKLER_SEQUENCE,
     SERVICE_RUN_SPRINKLER_ZONE,
     SERVICE_STOP_SPRINKLER,
@@ -275,6 +277,17 @@ def _bounded_command_id(value) -> str:
     return value
 
 
+def _bounded_command_source(value) -> str:
+    """Validate a small non-secret logical-run source label."""
+    if not isinstance(value, str) or not re.fullmatch(
+        r"[a-z0-9][a-z0-9_-]{0,31}", value
+    ):
+        raise vol.Invalid(
+            "source must contain 1 through 32 lowercase letters, numbers, underscores, or hyphens"
+        )
+    return value
+
+
 def async_register_irrigation_services(hass: HomeAssistant) -> None:
     """Register bounded sprinkler commands and exact-target response services."""
 
@@ -285,17 +298,37 @@ def async_register_irrigation_services(hass: HomeAssistant) -> None:
             int(call.data["zone"]),
             duration_seconds,
             command_id=call.data.get("command_id"),
+            source=call.data.get("source", "service"),
         )
 
     async def run_sequence(call: ServiceCall) -> None:
         coordinator = coordinator_for_device_id(hass, _single_device_id(call))
         await coordinator.async_start_sequence(
-            call.data["zones"], command_id=call.data.get("command_id")
+            call.data["zones"],
+            command_id=call.data.get("command_id"),
+            source=call.data.get("source", "service"),
+        )
+
+    async def pause(call: ServiceCall) -> None:
+        coordinator = coordinator_for_device_id(hass, _single_device_id(call))
+        await coordinator.async_pause(
+            command_id=call.data.get("command_id"),
+            source=call.data.get("source", "service"),
+        )
+
+    async def resume(call: ServiceCall) -> None:
+        coordinator = coordinator_for_device_id(hass, _single_device_id(call))
+        await coordinator.async_resume(
+            command_id=call.data.get("command_id"),
+            source=call.data.get("source", "service"),
         )
 
     async def stop(call: ServiceCall) -> None:
         coordinator = coordinator_for_device_id(hass, _single_device_id(call))
-        await coordinator.async_stop(command_id=call.data.get("command_id"))
+        await coordinator.async_stop(
+            command_id=call.data.get("command_id"),
+            source=call.data.get("source", "service"),
+        )
 
     async def refresh(call: ServiceCall) -> None:
         coordinator = coordinator_for_device_id(hass, _single_device_id(call))
@@ -338,6 +371,7 @@ def async_register_irrigation_services(hass: HomeAssistant) -> None:
                         vol.Optional("duration_minutes"): _bounded_duration,
                         vol.Optional("duration_seconds"): _bounded_duration_seconds,
                         vol.Optional("command_id"): _bounded_command_id,
+                        vol.Optional("source"): _bounded_command_source,
                     }
                 ),
                 _require_one_duration,
@@ -371,18 +405,28 @@ def async_register_irrigation_services(hass: HomeAssistant) -> None:
                         vol.Length(min=1, max=8),
                     ),
                     vol.Optional("command_id"): _bounded_command_id,
+                    vol.Optional("source"): _bounded_command_source,
                 }
             ),
         )
-        stop_schema = vol.Schema(
-            {
-                vol.Required(ATTR_DEVICE_ID): device_schema,
-                vol.Optional("command_id"): _bounded_command_id,
-            }
-        )
-        hass.services.async_register(
-            DOMAIN, SERVICE_STOP_SPRINKLER, stop, schema=stop_schema
-        )
+
+    control_schema = vol.Schema(
+        {
+            vol.Required(ATTR_DEVICE_ID): device_schema,
+            vol.Optional("command_id"): _bounded_command_id,
+            vol.Optional("source"): _bounded_command_source,
+        }
+    )
+    for service_name, handler in (
+        (SERVICE_PAUSE_SPRINKLER, pause),
+        (SERVICE_RESUME_SPRINKLER, resume),
+        (SERVICE_STOP_SPRINKLER, stop),
+    ):
+        if not hass.services.has_service(DOMAIN, service_name):
+            hass.services.async_register(
+                DOMAIN, service_name, handler, schema=control_schema
+            )
+    if not hass.services.has_service(DOMAIN, SERVICE_REFRESH_SPRINKLER):
         hass.services.async_register(
             DOMAIN, SERVICE_REFRESH_SPRINKLER, refresh, schema=target_only_schema
         )
@@ -442,6 +486,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         for service in (
             SERVICE_RUN_SPRINKLER_ZONE,
             SERVICE_RUN_SPRINKLER_SEQUENCE,
+            SERVICE_PAUSE_SPRINKLER,
+            SERVICE_RESUME_SPRINKLER,
             SERVICE_STOP_SPRINKLER,
             SERVICE_REFRESH_SPRINKLER,
             SERVICE_GET_SPRINKLER_SNAPSHOT,

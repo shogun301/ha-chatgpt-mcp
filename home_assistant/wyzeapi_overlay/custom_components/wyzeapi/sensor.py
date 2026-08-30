@@ -557,6 +557,11 @@ class WyzeIrrigationStatus(WyzeIrrigationBaseSensor):
 
     @property
     def native_value(self) -> str:
+        logical = self.coordinator.logical_run_snapshot()
+        if logical["state"] == "paused":
+            return "paused"
+        if logical["state"] == "running":
+            return "watering"
         data = self.coordinator.data or {}
         if data.get("connected") is None:
             return "unknown"
@@ -569,6 +574,7 @@ class WyzeIrrigationStatus(WyzeIrrigationBaseSensor):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         data = self.coordinator.data or {}
+        logical_run = self.coordinator.logical_run_snapshot()
         return {
             "active_zone_number": data.get("active_zone_number"),
             "active_zone_name": data.get("active_zone_name"),
@@ -593,6 +599,11 @@ class WyzeIrrigationStatus(WyzeIrrigationBaseSensor):
             "physical_state_verified": False,
             "command_pending": data.get("command_pending"),
             "command_status": data.get("command_status"),
+            "logical_run_state": logical_run["state"],
+            "logical_run": logical_run,
+            "can_pause": logical_run["can_pause"],
+            "can_resume": logical_run["can_resume"],
+            "can_stop": logical_run["can_stop"],
         }
 
 

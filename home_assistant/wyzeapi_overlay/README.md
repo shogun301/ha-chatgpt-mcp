@@ -1,20 +1,21 @@
 # Wyze sprinkler Home Assistant overlay
 
 This directory is a deterministic, sprinkler-only overlay for the installed
-`custom_components/wyzeapi` integration. It adds normalized read surfaces and
-four response-only Home Assistant services while preserving the existing four
-bounded sprinkler command services.
+`custom_components/wyzeapi` integration. It adds normalized read surfaces,
+four response-only Home Assistant services, and six bounded sprinkler command
+services.
 
 The two run services accept exactly one of `duration_seconds` or the legacy
 `duration_minutes`. Seconds must be an exact integer from 1 through 10800;
 legacy decimal minutes are rounded to the nearest second before construction.
-For 1-59 seconds, Home Assistant commands the provider's 60-second minimum,
-owns the requested timer, and issues stop at the requested duration. It requires
-affirmative idle before starting or advancing: either controller-reported idle
-or a controller-reported `past`/finished schedule run. Truly unknown watering
-state remains fail-closed and does not send a provider command. A Home Assistant
-outage during a sub-minute timer can delay the early stop, but the provider
-still ends at 60 seconds.
+Home Assistant owns every logical run timer and ordered queue, commands only the
+current zone, and issues stop at the requested duration. Pause captures the
+current-zone remainder and queue; resume restarts that remainder before the
+queued zones; stop abandons the entire run before touching the provider. The
+coordinator requires affirmative idle before starting or advancing: either
+controller-reported idle or a controller-reported `past`/finished schedule run.
+Truly unknown watering state remains fail-closed and does not send a provider
+command.
 
 ## Base guard
 
@@ -24,7 +25,7 @@ public source artifact.
 
 The base manifest reports version `0.1.39` and SHA-256
 `8C1551778463D995413F6A71739ADC53D820DED0CB069EF08E7DBB7A6395F1BC`.
-The overlay replaces it with version `0.1.43` so deployed source has a visible,
+The overlay replaces it with version `0.1.44` so deployed source has a visible,
 deterministic integration identity.
 Before deployment, require all replacement-file hashes below to match the
 destination. A mismatch is a stop-and-reinspect concurrency guard; do not copy
@@ -40,17 +41,17 @@ the overlay over a divergent integration.
 | `sensor.py` | `3AF7296A87C8B0EA0CDE2E98CE6A05BA81846FE8631D8DD09E5B1954E62DAC15` |
 | `services.yaml` | `F69AF27ABBF54435C1A978DBF791F8CDA8D8500187FE4067EE90C18D661A2950` |
 
-An upgrade from the immediately preceding overlay 0.1.42 accepts only this
-second exact hash set. These are the tracked 0.1.42 blobs from the public source
+An upgrade from the immediately preceding overlay 0.1.43 accepts only this
+second exact hash set. These are the tracked 0.1.43 blobs from the public source
 commit; accepting them does not broaden the destination-file guard.
 
-| Replacement file | Required 0.1.42 predecessor SHA-256 |
+| Replacement file | Required 0.1.43 predecessor SHA-256 |
 | --- | --- |
-| `manifest.json` | `883757E74AD64CE2CF7EEEDC82F08226A0E291A9236CD7EED6789E67B903F267` |
+| `manifest.json` | `1F5C6BC3E598B427BA94578FFC265C11A2727EB354DF9A9F40234D2EEF65D26B` |
 | `__init__.py` | `6C0937ACDDB9FCE385808E86AF9DFF66383AB36ED48C72A871E006096DE15A7A` |
 | `const.py` | `24531253DC5445C3D7F16D91CD6727BA9D2DB457CD81098A0471419AD88E2140` |
-| `irrigation.py` | `5E9FAD575055188F50F993D1F1397480F73C55B6F694380143DD1749B7AF3044` |
-| `irrigation_data.py` | `14A678AB9AC9A95DE5F0C66D752EA62BB8C71E35F662BE017B0EAA384B03610E` |
+| `irrigation.py` | `35DE1420A995018A91BCDA63B72F300C78A515B4566CD8541DC32D0D3A918684` |
+| `irrigation_data.py` | `38D5090DD7B4B9D5AF8DA56F349D8FC72E2D400E5633B39FE78DCCDB8616A30A` |
 | `sensor.py` | `95D9B4FFDDFE3199C6C98B62D30338350DAA8E5F6F29C1E501E2BDB53AF604BA` |
 | `services.yaml` | `78AF1900649BBB53DC074F66B998C8F5EBFC16AA924B59BA6D788B7F04BA0E08` |
 

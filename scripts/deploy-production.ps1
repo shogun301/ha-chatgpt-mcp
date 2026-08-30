@@ -20,7 +20,7 @@ if ($SshAddress -and (
     throw 'SshAddress must be a literal IPv4 address.'
 }
 
-$releaseVersion = '2.7.5'
+$releaseVersion = '2.7.6'
 $sourceRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $secretRoot = if ($SecretStagingPath) { [IO.Path]::GetFullPath($SecretStagingPath) } else { $null }
 $requiredSecrets = @(
@@ -114,12 +114,12 @@ set -Eeuo pipefail
 set +x
 umask 077
 
-release_version='2.7.5'
+release_version='2.7.6'
 release_commit='__RELEASE_COMMIT__'
 preflight_only='__PREFLIGHT_ONLY__'
 reuse_verified_overlay='__REUSE_VERIFIED_OVERLAY__'
 archive_sha256='__ARCHIVE_SHA256__'
-archive_path='/tmp/ha-chatgpt-mcp-2.7.5.tar.gz'
+archive_path='/tmp/ha-chatgpt-mcp-2.7.6.tar.gz'
 candidate_tag="ha-chatgpt-mcp:candidate-$release_commit"
 release_stage=$(mktemp -d /tmp/ha-mcp-release.XXXXXX)
 app_root='/opt/ha-chatgpt-mcp'
@@ -154,7 +154,7 @@ prior_tunnel_image_ref=''
 prior_tunnel_started=''
 desired_tunnel_image_id=''
 overlay_mutated=0
-overlay_backup="/opt/homeassistant/wyzeapi-overlay-backups/wyzeapi-pre-0.1.43-main-$stamp.tar.gz"
+overlay_backup="/opt/homeassistant/wyzeapi-overlay-backups/wyzeapi-pre-0.1.44-main-$stamp.tar.gz"
 overlay_baseline='/tmp/ha-mcp-overlay-baseline'
 overlay_target='/opt/homeassistant/config/custom_components/wyzeapi'
 homeassistant_started_before=''
@@ -570,7 +570,7 @@ for attempt in $(seq 1 30); do
 done
 curl --fail --silent --max-time 5 http://127.0.0.1:8001/healthz \
   >/tmp/ha-mcp-preflight-health.json
-python3 -c 'import json; p=json.load(open("/tmp/ha-mcp-preflight-health.json", encoding="utf-8")); assert p.get("status") == "ok" and p.get("service_version") == "2.7.5"'
+python3 -c 'import json; p=json.load(open("/tmp/ha-mcp-preflight-health.json", encoding="utf-8")); assert p.get("status") == "ok" and p.get("service_version") == "2.7.6"'
 sudo docker exec "$preflight_container" python -m scripts.production_mcp_verify
 sudo docker rm -f "$preflight_container" >/dev/null
 rm -f /tmp/ha-mcp-preflight-health.json
@@ -710,7 +710,7 @@ if [ "$reuse_verified_overlay" = 1 ]; then
     sudo test -f "$candidate_overlay/$name"
     sudo cmp --silent "$candidate_overlay/$name" "$overlay_target/$name"
   done
-  sudo python3 -c 'import json,sys; assert json.load(open(sys.argv[1], encoding="utf-8")).get("version") == "0.1.43"' \
+  sudo python3 -c 'import json,sys; assert json.load(open(sys.argv[1], encoding="utf-8")).get("version") == "0.1.44"' \
     "$overlay_target/manifest.json"
 else
   sudo install -d -o root -g root -m 0700 "$(dirname "$overlay_backup")"
@@ -756,7 +756,7 @@ with open('/tmp/ha-mcp-health.json', encoding='utf-8') as handle:
     payload = json.load(handle)
 assert payload.get('status') == 'ok'
 assert payload.get('home_assistant', {}).get('reachable') is True
-assert payload.get('service_version') == '2.7.5'
+assert payload.get('service_version') == '2.7.6'
 PY
 rm -f /tmp/ha-mcp-health.json
 curl --fail --silent --max-time 5 http://127.0.0.1:8123/ >/dev/null
@@ -768,7 +768,7 @@ for attempt in $(seq 1 180); do
     200|302|403)
       if curl --fail --silent --max-time 10 __PUBLIC_MCP_URL__/healthz \
           >/tmp/ha-mcp-public-health.json && \
-         python3 -c 'import json; p=json.load(open("/tmp/ha-mcp-public-health.json", encoding="utf-8")); assert p.get("status") == "ok" and p.get("service_version") == "2.7.5"'; then
+         python3 -c 'import json; p=json.load(open("/tmp/ha-mcp-public-health.json", encoding="utf-8")); assert p.get("status") == "ok" and p.get("service_version") == "2.7.6"'; then
         fixed_routes_ready=1
         break
       fi

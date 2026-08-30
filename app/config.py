@@ -37,23 +37,6 @@ def _optional_entity_id(name: str, domain: str) -> str | None:
     return value
 
 
-def _optional_entity_ids(name: str, domain: str, maximum: int) -> tuple[str, ...]:
-    raw = _optional(name)
-    if raw is None:
-        return ()
-    values = tuple(item.strip() for item in raw.split(",") if item.strip())
-    if not values or len(values) > maximum or len(set(values)) != len(values):
-        raise RuntimeError(
-            f"{name} must contain between 1 and {maximum} unique entity IDs"
-        )
-    if any(
-        not _ENTITY_ID_RE.fullmatch(value) or not value.startswith(f"{domain}.")
-        for value in values
-    ):
-        raise RuntimeError(f"{name} must contain only exact {domain} entity IDs")
-    return values
-
-
 def _optional_secret_file(name: str) -> str | None:
     raw_path = _optional(name)
     if raw_path is None:
@@ -89,9 +72,6 @@ except ValueError as exc:
     ) from exc
 if not 1 <= SPRINKLER_ZONE_COUNT <= 8:
     raise RuntimeError("SPRINKLER_ZONE_COUNT must be an integer from 1 through 8")
-AUTOMATION_SPRINKLER_BUTTON_ENTITIES = _optional_entity_ids(
-    "AUTOMATION_SPRINKLER_BUTTON_ENTITIES", "button", 3
-)
 AUTOMATION_DAILY_FORECAST_ENTITY = _optional_entity_id(
     "AUTOMATION_DAILY_FORECAST_ENTITY", "weather"
 )

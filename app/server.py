@@ -5,6 +5,7 @@ import hmac
 import ipaddress
 import json
 import logging
+import math
 import re
 import time
 import uuid
@@ -102,7 +103,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 LOGGER = logging.getLogger("ha_chatgpt_mcp")
-SERVER_VERSION = "2.7.5"
+SERVER_VERSION = "2.7.6"
 audit = AuditLog(config.AUDIT_LOG_PATH)
 oauth = OAuthServer(
     OAuthStore(config.DATABASE_PATH),
@@ -4688,7 +4689,7 @@ async def get_sprinkler_capabilities() -> SprinklerCapabilities:
             supported=True,
             operations=["command"],
             evidence="commanded",
-            semantics="One enabled zone for an integer 1 through 10800 seconds after explicit confirmation; Home Assistant owns sub-minute timing and stop.",
+            semantics="One enabled zone for an integer 1 through 10800 seconds after explicit confirmation; Home Assistant owns the logical timer and stop.",
             upstream_source="Home Assistant Wyze irrigation service",
         ),
         CapabilityItem(
@@ -5501,9 +5502,9 @@ async def run_sprinkler_sequence_exact(
     )
 
 
-@mcp.tool(title="Stop all sprinklers", annotations=IDEMPOTENT_WRITE)
+@mcp.tool(title="Stop all sprinklers", annotations=WRITE)
 async def stop_sprinklers() -> SprinklerCommandResult:
-    """Stop all sprinkler zones; safe and idempotent even when no zone is running."""
+    """Abandon the active logical run and stop its current zone if running."""
     _require_sprinkler_write("stop")
     device_id = await _sprinkler_device_id()
     command_id = str(uuid.uuid4())
@@ -5729,7 +5730,91 @@ async def send_mobile_notification(
     return {"status": "accepted", "result": result}
 
 
-def _validate_automation_config(automation: dict[str, Any]) -> dict[str, Any]:
+AUTOMATION_SPRINKLER_SERVICES = {
+    "run_sprinkler_sequence",
+    "pause_sprinkler",
+    "resume_sprinkler",
+    "stop_sprinkler",
+}
+
+
+def _automation_uses_managed_sprinkler(value: Any) -> bool:
+    """Return whether nested actions use the narrow Wyze logical-run surface."""
+    if isinstance(value, list):
+        return any(_automation_uses_managed_sprinkler(item) for item in value)
+    if not isinstance(value, dict):
+        return False
+    service = value.get("action", value.get("service"))
+    if service in {f"wyzeapi.{name}" for name in AUTOMATION_SPRINKLER_SERVICES}:
+        return True
+    return any(_automation_uses_managed_sprinkler(item) for item in value.values())
+
+
+def _validate_automation_sprinkler_action(service: str, data: dict[str, Any]) -> None:
+    """Validate only literal bounded logical-run service inputs."""
+    allowed_common = {"command_id", "source"}
+    command_id = data.get("command_id")
+    if command_id is not None and (
+        not isinstance(command_id, str)
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", command_id)
+    ):
+        raise ValueError("Sprinkler command_id must be one bounded literal ID")
+    source = data.get("source")
+    if source is not None and (
+        not isinstance(source, str)
+        or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", source)
+    ):
+        raise ValueError("Sprinkler source must be one bounded literal label")
+    if service != "run_sprinkler_sequence":
+        if set(data) - allowed_common:
+            raise ValueError("Pause, resume, and stop accept only correlation metadata")
+        return
+    if set(data) - (allowed_common | {"zones"}):
+        raise ValueError("Sprinkler sequences contain unsupported fields")
+    zones = data.get("zones")
+    if not isinstance(zones, list) or not 1 <= len(zones) <= 8:
+        raise ValueError("Sprinkler sequences require 1 through 8 literal zones")
+    seen: set[int] = set()
+    total_seconds = 0
+    for entry in zones:
+        if not isinstance(entry, dict):
+            raise ValueError("Every sprinkler zone must be a literal object")
+        duration_fields = {"duration_seconds", "duration_minutes"} & set(entry)
+        if (
+            set(entry) - {"zone", "duration_seconds", "duration_minutes"}
+            or len(duration_fields) != 1
+        ):
+            raise ValueError("Every sprinkler zone requires exactly one duration")
+        zone = entry.get("zone")
+        if isinstance(zone, bool) or not isinstance(zone, (int, float)):
+            raise ValueError("Sprinkler zones must be literal integers")
+        zone_number = int(zone)
+        if zone_number != zone or not 1 <= zone_number <= 8 or zone_number in seen:
+            raise ValueError("Sprinkler zones must be unique integers from 1 through 8")
+        duration_key = next(iter(duration_fields))
+        duration = entry[duration_key]
+        if isinstance(duration, bool) or not isinstance(duration, (int, float)):
+            raise ValueError("Sprinkler durations must be literal numbers")
+        duration_number = float(duration)
+        if not math.isfinite(duration_number):
+            raise ValueError("Sprinkler durations must be finite")
+        if duration_key == "duration_seconds":
+            if not duration_number.is_integer() or not 1 <= duration_number <= 10_800:
+                raise ValueError("Sprinkler seconds must be integers from 1 through 10800")
+            seconds = int(duration_number)
+        else:
+            if not 1 <= duration_number <= 180:
+                raise ValueError("Sprinkler minutes must be from 1 through 180")
+            seconds = round(duration_number * 60)
+        total_seconds += seconds
+        if total_seconds > 10_800:
+            raise ValueError("Sprinkler sequence total must not exceed 10800 seconds")
+        seen.add(zone_number)
+
+
+def _validate_automation_config(
+    automation: dict[str, Any], *, sprinkler_device_id: str | None = None
+) -> dict[str, Any]:
     if not isinstance(automation, dict):
         raise ValueError("automation must be an object")
     allowed = {
@@ -5757,17 +5842,23 @@ def _validate_automation_config(automation: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(
             "automation must not contain credentials or secret-bearing fields"
         )
-    _validate_automation_actions(automation["actions"])
+    _validate_automation_actions(
+        automation["actions"], sprinkler_device_id=sprinkler_device_id
+    )
     result = dict(automation)
     result.setdefault("conditions", [])
     result.setdefault("mode", "single")
     return result
 
 
-def _validate_automation_actions(value: Any) -> None:
+def _validate_automation_actions(
+    value: Any, *, sprinkler_device_id: str | None = None
+) -> None:
     if isinstance(value, list):
         for item in value:
-            _validate_automation_actions(item)
+            _validate_automation_actions(
+                item, sprinkler_device_id=sprinkler_device_id
+            )
         return
     if not isinstance(value, dict):
         return
@@ -5782,23 +5873,34 @@ def _validate_automation_actions(value: Any) -> None:
         domain, name = service.split(".", 1)
         if not SERVICE_PART_RE.fullmatch(domain) or not SERVICE_PART_RE.fullmatch(name):
             raise ValueError("Invalid automation action service")
-        sprinkler_button = domain == "button" and name == "press"
+        managed_sprinkler = (
+            domain == "wyzeapi" and name in AUTOMATION_SPRINKLER_SERVICES
+        )
         daily_forecast = domain == "weather" and name == "get_forecasts"
-        if domain in AUTOMATION_BLOCKED_DOMAINS and not sprinkler_button:
+        if domain in AUTOMATION_BLOCKED_DOMAINS and not managed_sprinkler:
             raise ValueError(
                 f"Automation actions in the {domain} domain are not exposed"
             )
         allowed_services = ALLOWED_SERVICES.get(
             domain, set()
         ) | AUTOMATION_EXTRA_SERVICES.get(domain, set())
-        if name not in allowed_services and not sprinkler_button and not daily_forecast:
+        if name not in allowed_services and not managed_sprinkler and not daily_forecast:
             raise ValueError("That automation action service is not allowlisted")
         target = value.get("target")
         if domain != "notify" and target is None:
             raise ValueError(
                 "Automation entity actions require an exact target.entity_id"
             )
-        if target is not None:
+        entity_ids: list[str] = []
+        if managed_sprinkler:
+            if (
+                sprinkler_device_id is None
+                or target != {"device_id": sprinkler_device_id}
+            ):
+                raise ValueError(
+                    "Sprinkler automation actions require the exact current controller device ID"
+                )
+        elif target is not None:
             if not isinstance(target, dict) or set(target) != {"entity_id"}:
                 raise ValueError("Automation actions may target only exact entity IDs")
             entity_ids = _entity_ids(target)
@@ -5815,18 +5917,10 @@ def _validate_automation_actions(value: Any) -> None:
             raise ValueError("Automation action data must be an object")
         if _contains_target_key(data):
             raise ValueError("Automation targets must use target.entity_id, not data")
-        if sprinkler_button:
-            if (
-                len(entity_ids) != 1
-                or entity_ids[0] not in config.AUTOMATION_SPRINKLER_BUTTON_ENTITIES
-            ):
-                raise ValueError(
-                    "button.press is limited to one configured sprinkler-zone button"
-                )
-            if data or "response_variable" in value:
-                raise ValueError(
-                    "Sprinkler button actions do not accept data or responses"
-                )
+        if managed_sprinkler:
+            _validate_automation_sprinkler_action(name, data)
+            if "response_variable" in value or "continue_on_error" in value:
+                raise ValueError("Sprinkler actions do not return responses")
         if daily_forecast:
             if config.AUTOMATION_DAILY_FORECAST_ENTITY is None or entity_ids != [
                 config.AUTOMATION_DAILY_FORECAST_ENTITY
@@ -5848,7 +5942,7 @@ def _validate_automation_actions(value: Any) -> None:
             ):
                 raise ValueError("continue_on_error must be true or false")
     for item in value.values():
-        _validate_automation_actions(item)
+        _validate_automation_actions(item, sprinkler_device_id=sprinkler_device_id)
 
 
 @mcp.tool(title="Create a Home Assistant automation", annotations=WRITE)
@@ -5859,7 +5953,14 @@ async def create_automation(
     _require_write()
     _require_confirmed(confirmed, "Creating an automation")
     validate_automation_id(automation_id)
-    validated = _validate_automation_config(automation)
+    sprinkler_device_id = (
+        await _sprinkler_device_id()
+        if _automation_uses_managed_sprinkler(automation.get("actions"))
+        else None
+    )
+    validated = _validate_automation_config(
+        automation, sprinkler_device_id=sprinkler_device_id
+    )
     existing = await list_automations()
     existing_ids = {
         str((item.get("attributes") or {}).get("id"))
@@ -5886,7 +5987,14 @@ async def update_automation(
     _require_write()
     _require_confirmed(confirmed, "Updating an automation")
     validate_automation_id(automation_id)
-    validated = _validate_automation_config(automation)
+    sprinkler_device_id = (
+        await _sprinkler_device_id()
+        if _automation_uses_managed_sprinkler(automation.get("actions"))
+        else None
+    )
+    validated = _validate_automation_config(
+        automation, sprinkler_device_id=sprinkler_device_id
+    )
     await _resolve_automation(automation_id)
     backup = ha.backup_automations("update-automation")
     result = await ha.save_automation_config(automation_id, validated)

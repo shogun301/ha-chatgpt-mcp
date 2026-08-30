@@ -1105,7 +1105,9 @@ def reconcile_command_status(
     )
     observed = start_zone_matches or (
         action == "start_sequence" and watering is True
-    ) or (action == "stop" and watering is False)
+    ) or (action == "resume" and watering is True) or (
+        action in {"pause", "stop"} and watering is False
+    )
     if observed:
         status["state"] = "controller_state_observed"
         status["evidence_type"] = "inferred"
@@ -1335,19 +1337,25 @@ def sprinkler_capabilities() -> dict[str, Any]:
             "capability": "start_zone",
             "supported": True,
             "access": "command",
-            "semantics": "one enabled zone for an exact 1 through 10800 seconds; Home Assistant times and stops sub-minute runs",
+            "semantics": "one enabled zone for an exact 1 through 10800 seconds; Home Assistant owns its logical timer and stop",
         },
         {
             "capability": "start_sequence",
             "supported": True,
             "access": "command",
-            "semantics": "ordered enabled-zone run; Home Assistant times, stops, and verifies idle between zones when any duration is sub-minute",
+            "semantics": "ordered enabled-zone run kept entirely in Home Assistant; only the current zone is sent to Wyze",
+        },
+        {
+            "capability": "pause_resume_logical_run",
+            "supported": True,
+            "access": "command",
+            "semantics": "pause retains the current-zone remainder and complete local queue; resume restarts that remainder before queued zones",
         },
         {
             "capability": "stop_watering",
             "supported": True,
             "access": "command",
-            "semantics": "stop the controller's current schedule or quick run",
+            "semantics": "abandon the complete Home Assistant-owned logical run and stop its current controller zone when running",
         },
     ]
     unsupported = [
@@ -1388,7 +1396,7 @@ def sprinkler_capabilities() -> dict[str, Any]:
         },
     ]
     return {
-        "integration_version": "0.1.43",
+        "integration_version": "0.1.44",
         "supported": supported,
         "unsupported": unsupported,
         "evidence_labels": [

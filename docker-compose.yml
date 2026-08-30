@@ -1,6 +1,6 @@
 services:
   ha-chatgpt-mcp:
-    image: ha-chatgpt-mcp:2.7.5
+    image: ha-chatgpt-mcp:2.7.6
     build:
       context: .
     container_name: ha-chatgpt-mcp
@@ -19,7 +19,6 @@ services:
       SPRINKLER_ENTITY_PREFIX: ${SPRINKLER_ENTITY_PREFIX:-sprinkler_controller}
       SPRINKLER_ZONE_ENTITY_PREFIX: ${SPRINKLER_ZONE_ENTITY_PREFIX:-sprinkler_controller_zone}
       SPRINKLER_ZONE_COUNT: ${SPRINKLER_ZONE_COUNT:-8}
-      AUTOMATION_SPRINKLER_BUTTON_ENTITIES: ${AUTOMATION_SPRINKLER_BUTTON_ENTITIES:-}
       AUTOMATION_DAILY_FORECAST_ENTITY: ${AUTOMATION_DAILY_FORECAST_ENTITY:-}
       HA_TOKEN_FILE: /run/secrets/ha_token
       OAUTH_PASSWORD_HASH_FILE: /run/secrets/oauth_password_hash

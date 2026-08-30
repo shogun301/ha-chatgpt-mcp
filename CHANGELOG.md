@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.7.6 - 2026-08-30
+
+- Add coordinator-owned logical sprinkler runs with ordered queue state and bounded pause, resume, and stop services for scheduled and dashboard sequences.
+- Make Home Assistant own every sequence transition so stop abandons all queued zones and resume continues the captured current-zone remainder before advancing in order.
+- Allow automation writes only for the exact current controller, literal bounded logical-run services, and existing daily forecast reads; remove the legacy sprinkler-button exception.
+
 ## 2.7.5 - 2026-08-29
 
 - Recognize Wyze's controller-reported `past` schedule-run state as finished so completed quick runs produce idle telemetry and subsequent manual runs are accepted.

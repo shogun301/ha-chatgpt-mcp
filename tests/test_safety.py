@@ -91,7 +91,7 @@ class CloudToolSurfaceTests(unittest.TestCase):
     def test_server_advertises_expanded_typed_surface(self) -> None:
         tools = asyncio.run(mcp.list_tools())
         names = {tool.name for tool in tools}
-        self.assertEqual(mcp.version, "2.7.5")
+        self.assertEqual(mcp.version, "2.7.6")
         self.assertEqual(len(names), 107)
         self.assertTrue(
             {
@@ -664,81 +664,84 @@ class ConfigurationSafetyTests(unittest.TestCase):
         )
         self.assertEqual(config["actions"][0]["action"], "input_text.set_value")
 
-    def test_automation_accepts_only_configured_sprinkler_buttons(self) -> None:
+    def test_automation_accepts_only_bounded_logical_sprinkler_services(self) -> None:
         base = {
-            "alias": "Water one sprinkler zone",
+            "alias": "Water one sprinkler sequence",
             "triggers": [{"trigger": "time", "at": "05:00:00"}],
         }
-        configured = tuple(
-            f"button.sprinkler_controller_zone_{zone}" for zone in range(1, 4)
+        device_id = "33fde5713a37b011eb39cd571d5bcee3"
+        accepted = {
+            "action": "wyzeapi.run_sprinkler_sequence",
+            "target": {"device_id": device_id},
+            "data": {
+                "zones": [
+                    {"zone": 1, "duration_seconds": 480},
+                    {"zone": 2, "duration_minutes": 8},
+                    {"zone": 3, "duration_seconds": 480},
+                ],
+                "command_id": "morning_schedule",
+                "source": "scheduled",
+            },
+        }
+        config = _validate_automation_config(
+            {**base, "actions": [accepted]}, sprinkler_device_id=device_id
         )
-        with patch(
-            "app.server.config.AUTOMATION_SPRINKLER_BUTTON_ENTITIES", configured
-        ):
-            for entity_id in configured:
+        self.assertEqual(config["actions"][0], accepted)
+
+        for service in ("pause_sprinkler", "resume_sprinkler", "stop_sprinkler"):
+            action = {
+                "action": f"wyzeapi.{service}",
+                "target": {"device_id": device_id},
+                "data": {"source": "scheduled"},
+            }
+            with self.subTest(service=service):
                 config = _validate_automation_config(
-                    {
-                        **base,
-                        "actions": [
-                            {
-                                "action": "button.press",
-                                "target": {"entity_id": entity_id},
-                            }
-                        ],
-                    }
+                    {**base, "actions": [action]}, sprinkler_device_id=device_id
                 )
-                self.assertEqual(config["actions"][0]["target"]["entity_id"], entity_id)
+                self.assertEqual(config["actions"][0], action)
 
-            rejected = (
-                "button.unrelated",
-                "button.sprinkler_controller_stop_all_zones",
-                "button.sprinkler_controller_zone_4",
-                "{{ sprinkler_button }}",
-            )
-            for entity_id in rejected:
-                with self.subTest(entity_id=entity_id), self.assertRaises(ValueError):
-                    _validate_automation_config(
-                        {
-                            **base,
-                            "actions": [
-                                {
-                                    "action": "button.press",
-                                    "target": {"entity_id": entity_id},
-                                }
-                            ],
-                        }
-                    )
-
-            for action in (
-                {
-                    "action": "button.press",
-                    "target": {"entity_id": list(configured[:2])},
+        rejected = (
+            {**accepted, "target": {"device_id": "wrong"}},
+            {key: value for key, value in accepted.items() if key != "target"},
+            {
+                **accepted,
+                "target": {"entity_id": "sensor.sprinkler_system_watering_status"},
+            },
+            {
+                **accepted,
+                "data": {**accepted["data"], "zones": "{{ zones }}"},
+            },
+            {
+                **accepted,
+                "data": {
+                    **accepted["data"],
+                    "zones": [
+                        {"zone": 1, "duration_seconds": 60},
+                        {"zone": 1, "duration_seconds": 60},
+                    ],
                 },
-                {
-                    "action": "button.press",
-                    "target": {"entity_id": configured[0]},
-                    "data": {"unexpected": True},
+            },
+            {
+                **accepted,
+                "data": {
+                    **accepted["data"],
+                    "zones": [{"zone": 1, "duration_seconds": 10_801}],
                 },
-                {
-                    "action": "button.turn_on",
-                    "target": {"entity_id": configured[0]},
-                },
-            ):
-                with self.subTest(action=action), self.assertRaises(ValueError):
-                    _validate_automation_config({**base, "actions": [action]})
-
-        with patch("app.server.config.AUTOMATION_SPRINKLER_BUTTON_ENTITIES", ()):
-            with self.assertRaises(ValueError):
+            },
+            {
+                "action": "wyzeapi.pause_sprinkler",
+                "target": {"device_id": device_id},
+                "data": {"zones": []},
+            },
+            {
+                "action": "button.press",
+                "target": {"entity_id": "button.sprinkler_controller_zone_1"},
+            },
+        )
+        for action in rejected:
+            with self.subTest(action=action), self.assertRaises(ValueError):
                 _validate_automation_config(
-                    {
-                        **base,
-                        "actions": [
-                            {
-                                "action": "button.press",
-                                "target": {"entity_id": configured[0]},
-                            }
-                        ],
-                    }
+                    {**base, "actions": [action]}, sprinkler_device_id=device_id
                 )
 
     def test_automation_accepts_only_bounded_daily_home_forecast(self) -> None:

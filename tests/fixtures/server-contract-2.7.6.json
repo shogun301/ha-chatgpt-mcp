@@ -1,9 +1,9 @@
 {
-  "version": "2.7.5",
+  "version": "2.7.6",
   "tool_count": 107,
   "tool_schema_sha256": "98638a2b74dac3d76a238a5f2d812dd75c4eba5d75133e42cf2ace005e9c5517",
   "tool_output_schema_sha256": "7542317cf7bc6aad85bf5bd129a95722d20890b4d34834cc247952a6d3b18b05",
-  "tool_annotations_sha256": "9ae1ab31c5a2a4c6a059e77e4423e3b2cefd5c216d4b336531b0b41fe4b2cb6b",
+  "tool_annotations_sha256": "b90b3abccc4f789d743c2675b4b735bf53b5b064ff7fe5490bd60d2feabbc55a",
   "tool_names": [
     "activate_scene",
     "add_todo_item",

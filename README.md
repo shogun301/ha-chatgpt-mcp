@@ -43,7 +43,7 @@ unrestricted service proxy.
 - **OAuth-native remote access:** authorization code flow with S256 PKCE,
   dynamic client registration, scoped access tokens, and MCP resource metadata.
 
-Version **2.7.5** currently advertises **107 tools**. See
+Version **2.7.6** currently advertises **107 tools**. See
 [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## Architecture
@@ -171,22 +171,22 @@ entities. Keep real entity IDs in local configuration, not in Git.
 
 Sprinkler controller entities and zone entities may use different prefixes;
 configure `SPRINKLER_ENTITY_PREFIX` and `SPRINKLER_ZONE_ENTITY_PREFIX`
-respectively. Automation service exceptions are disabled by default. To permit
-forecast-adjusted irrigation, set `AUTOMATION_SPRINKLER_BUTTON_ENTITIES` to no
-more than three comma-separated exact button IDs and
-`AUTOMATION_DAILY_FORECAST_ENTITY` to one exact weather entity. The validator
-then accepts only `button.press` for one configured button and only a daily
+respectively. Forecast-adjusted irrigation automations may use only the
+logical-run `wyzeapi.run_sprinkler_sequence`, `pause_sprinkler`,
+`resume_sprinkler`, and `stop_sprinkler` services, targeted to the exact current
+controller device with bounded literal zone and runtime inputs. Set
+`AUTOMATION_DAILY_FORECAST_ENTITY` to one exact weather entity to allow a daily
 `weather.get_forecasts` request with a bounded literal response variable.
 
 Wyze's private sprinkler API has no stable official programming contract. The
 bundled [`home_assistant/wyzeapi_overlay`](home_assistant/wyzeapi_overlay/README.md)
-adds four response-only services and preserves exact native identifiers while
+adds four response-only services, six bounded command services, and preserves exact native identifiers while
 normalizing zones as `zone-1` through `zone-8`. Every sprinkler output labels
 its evidence as commanded, controller-reported, calculated, inferred, or
 physically measured. Current state is never described as physical valve-open
-feedback. Exact 1-59-second requests are timed inside Home Assistant: the
-integration sends the provider's 60-second minimum, stops at the requested
-second, and requires controller-reported idle before advancing a sequence. See the
+feedback. Home Assistant owns every logical run timer and ordered queue: it
+stops at the requested second, requires controller-reported idle before
+advancing, and retains the current remainder and queue while paused. See the
 [capability matrix](docs/wyze-sprinkler-capability-matrix.md) for confirmed
 semantics and upstream limits.
 

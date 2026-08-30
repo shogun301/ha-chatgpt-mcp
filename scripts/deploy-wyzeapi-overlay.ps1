@@ -53,7 +53,7 @@ stage_target="$ha_config/.wyzeapi-overlay-candidate-$release_commit"
 backup_root='/opt/homeassistant/wyzeapi-overlay-backups'
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 requested_backup=${1:-}
-backup=${requested_backup:-"$backup_root/wyzeapi-pre-0.1.43-$stamp.tar.gz"}
+backup=${requested_backup:-"$backup_root/wyzeapi-pre-0.1.44-$stamp.tar.gz"}
 token_file='/opt/ha-chatgpt-mcp/secrets/ha_token'
 mutated=0
 overlay_stage='validating_archive'
@@ -69,11 +69,11 @@ declare -A base_hashes=(
   [services.yaml]='F69AF27ABBF54435C1A978DBF791F8CDA8D8500187FE4067EE90C18D661A2950'
 )
 declare -A predecessor_hashes=(
-  [manifest.json]='883757E74AD64CE2CF7EEEDC82F08226A0E291A9236CD7EED6789E67B903F267'
+  [manifest.json]='1F5C6BC3E598B427BA94578FFC265C11A2727EB354DF9A9F40234D2EEF65D26B'
   [__init__.py]='6C0937ACDDB9FCE385808E86AF9DFF66383AB36ED48C72A871E006096DE15A7A'
   [const.py]='24531253DC5445C3D7F16D91CD6727BA9D2DB457CD81098A0471419AD88E2140'
-  [irrigation.py]='5E9FAD575055188F50F993D1F1397480F73C55B6F694380143DD1749B7AF3044'
-  [irrigation_data.py]='14A678AB9AC9A95DE5F0C66D752EA62BB8C71E35F662BE017B0EAA384B03610E'
+  [irrigation.py]='35DE1420A995018A91BCDA63B72F300C78A515B4566CD8541DC32D0D3A918684'
+  [irrigation_data.py]='38D5090DD7B4B9D5AF8DA56F349D8FC72E2D400E5633B39FE78DCCDB8616A30A'
   [sensor.py]='95D9B4FFDDFE3199C6C98B62D30338350DAA8E5F6F29C1E501E2BDB53AF604BA'
   [services.yaml]='78AF1900649BBB53DC074F66B998C8F5EBFC16AA924B59BA6D788B7F04BA0E08'
 )
@@ -290,7 +290,7 @@ test -d "$overlay_root"
 actual_files=$(cd "$overlay_root" && find . -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)
 expected_files=$(printf '%s\n' "${files[@]}" | sort)
 test "$actual_files" = "$expected_files"
-python3 -c 'import json,sys; p=json.load(open(sys.argv[1], encoding="utf-8")); assert p["domain"]=="wyzeapi" and p["version"]=="0.1.43"' \
+python3 -c 'import json,sys; p=json.load(open(sys.argv[1], encoding="utf-8")); assert p["domain"]=="wyzeapi" and p["version"]=="0.1.44"' \
   "$overlay_root/manifest.json"
 
 sudo test -d "$target"
@@ -325,7 +325,7 @@ capture_runtime /tmp/wyze-overlay-prior.json
 
 sudo install -d -o root -g root -m 0700 "$backup_root"
 case "$backup" in
-  "$backup_root"/wyzeapi-pre-0.1.43-*.tar.gz) ;;
+  "$backup_root"/wyzeapi-pre-0.1.44-*.tar.gz) ;;
   *) echo 'Overlay backup path is outside the guarded backup namespace.' >&2; exit 1 ;;
 esac
 if [ -n "$requested_backup" ]; then
@@ -345,7 +345,7 @@ sudo docker exec homeassistant python -m py_compile \
   "/config/$(basename "$stage_target")/irrigation_data.py" \
   "/config/$(basename "$stage_target")/sensor.py"
 sudo docker exec homeassistant python -c \
-  'import pathlib,yaml; p=pathlib.Path("/config")/"__STAGE_BASENAME__"/"services.yaml"; value=yaml.safe_load(p.read_text()); assert isinstance(value,dict) and len(value)==8'
+  'import pathlib,yaml; p=pathlib.Path("/config")/"__STAGE_BASENAME__"/"services.yaml"; value=yaml.safe_load(p.read_text()); assert isinstance(value,dict) and len(value)==10'
 
 overlay_stage='installing_candidate'
 mutated=1
@@ -369,7 +369,8 @@ import json
 with open('/tmp/wyze-overlay-services.json', encoding='utf-8') as handle:
     domains = {item['domain']: set(item['services']) for item in json.load(handle)}
 required = {
-    'run_sprinkler_zone', 'run_sprinkler_sequence', 'stop_sprinkler',
+    'run_sprinkler_zone', 'run_sprinkler_sequence', 'pause_sprinkler',
+    'resume_sprinkler', 'stop_sprinkler',
     'refresh_sprinkler', 'get_sprinkler_snapshot',
     'get_sprinkler_schedule_runs', 'get_sprinkler_schedules',
     'get_sprinkler_capabilities',
@@ -421,7 +422,7 @@ def values(value):
         for child in value.values(): yield from values(child)
     elif isinstance(value, list):
         for child in value: yield from values(child)
-assert any(item.get("integration_version") == "0.1.43" for item in values(p.get("service_response")))
+assert any(item.get("integration_version") == "0.1.44" for item in values(p.get("service_response")))
 '
   fi
 done
@@ -437,7 +438,8 @@ before = load('/tmp/wyze-overlay-prior.json')
 after = load('/tmp/wyze-overlay-current.json')
 zones = load('/tmp/wyze-overlay-snapshot-zones.json')
 required = {
-    'run_sprinkler_zone', 'run_sprinkler_sequence', 'stop_sprinkler',
+    'run_sprinkler_zone', 'run_sprinkler_sequence', 'pause_sprinkler',
+    'resume_sprinkler', 'stop_sprinkler',
     'refresh_sprinkler', 'get_sprinkler_snapshot',
     'get_sprinkler_schedule_runs', 'get_sprinkler_schedules',
     'get_sprinkler_capabilities',
@@ -479,7 +481,7 @@ sudo rm -f -- "$archive_path" /tmp/__SCRIPT_NAME__ \
   /tmp/wyze-overlay-snapshot-zones.json \
   /tmp/wyze-overlay-prior-entries.json /tmp/wyze-overlay-current-entries.json \
   /tmp/wyze-overlay-restored-entries.json
-printf 'Wyze sprinkler overlay 0.1.43 deployed from commit %s; backup=%s\n' \
+printf 'Wyze sprinkler overlay 0.1.44 deployed from commit %s; backup=%s\n' \
   "$release_commit" "$backup"
 '@
 
