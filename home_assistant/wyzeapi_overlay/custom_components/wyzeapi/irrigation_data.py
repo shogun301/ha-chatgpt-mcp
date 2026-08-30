@@ -1386,7 +1386,7 @@ def sprinkler_capabilities() -> dict[str, Any]:
         },
     ]
     return {
-        "integration_version": "0.1.41",
+        "integration_version": "0.1.42",
         "supported": supported,
         "unsupported": unsupported,
         "evidence_labels": [

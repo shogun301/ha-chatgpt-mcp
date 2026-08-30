@@ -154,7 +154,7 @@ prior_tunnel_image_ref=''
 prior_tunnel_started=''
 desired_tunnel_image_id=''
 overlay_mutated=0
-overlay_backup="/opt/homeassistant/wyzeapi-overlay-backups/wyzeapi-pre-0.1.41-main-$stamp.tar.gz"
+overlay_backup="/opt/homeassistant/wyzeapi-overlay-backups/wyzeapi-pre-0.1.42-main-$stamp.tar.gz"
 overlay_baseline='/tmp/ha-mcp-overlay-baseline'
 overlay_target='/opt/homeassistant/config/custom_components/wyzeapi'
 homeassistant_started_before=''
@@ -710,7 +710,7 @@ if [ "$reuse_verified_overlay" = 1 ]; then
     sudo test -f "$candidate_overlay/$name"
     sudo cmp --silent "$candidate_overlay/$name" "$overlay_target/$name"
   done
-  sudo python3 -c 'import json,sys; assert json.load(open(sys.argv[1], encoding="utf-8")).get("version") == "0.1.41"' \
+  sudo python3 -c 'import json,sys; assert json.load(open(sys.argv[1], encoding="utf-8")).get("version") == "0.1.42"' \
     "$overlay_target/manifest.json"
 else
   sudo install -d -o root -g root -m 0700 "$(dirname "$overlay_backup")"

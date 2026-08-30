@@ -655,7 +655,7 @@ def test_capability_contract_returns_explicit_unsupported_signals() -> None:
         assert unsupported[capability]["supported"] is False
         assert unsupported[capability]["reason"]
     assert contract["physical_state_verified"] is False
-    assert contract["integration_version"] == "0.1.41"
+    assert contract["integration_version"] == "0.1.42"
     assert "physically-measured" not in contract["evidence_labels"]
     assert "unknown native units" in supported["modeled_zone_moisture"]["semantics"]
 
@@ -1298,6 +1298,7 @@ def test_home_assistant_owns_subminute_sequence_timing_and_stops_each_zone() -> 
     )
     method_names = {
         "async_start_sequence",
+        "_async_prepare_managed_run",
         "_async_complete_managed_runs",
         "_async_managed_stop",
         "_async_wait_for_idle",
@@ -1360,7 +1361,7 @@ def test_home_assistant_owns_subminute_sequence_timing_and_stops_each_zone() -> 
         last_update_success=True,
         data={
             "connected": True,
-            "watering": False,
+            "watering": None,
             "active_zone_number": None,
             "endpoint_errors": [],
             "zones": [
@@ -1414,6 +1415,7 @@ def test_home_assistant_owns_subminute_sequence_timing_and_stops_each_zone() -> 
 
     asyncio.run(exercise())
     assert calls == [
+        ("stop",),
         ("start", 1, 60),
         ("stop",),
         ("start", 2, 60),
@@ -1465,7 +1467,7 @@ def test_overlay_manifest_and_base_guard_are_deterministic() -> None:
     readme = (OVERLAY.parents[1] / "README.md").read_text(encoding="utf-8")
 
     assert manifest["domain"] == "wyzeapi"
-    assert manifest["version"] == "0.1.41"
+    assert manifest["version"] == "0.1.42"
     for filename in (
         "manifest.json",
         "__init__.py",

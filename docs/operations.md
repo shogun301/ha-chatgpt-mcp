@@ -113,7 +113,7 @@ independently reviewed overlay-only deployment, use:
 
 The deployer accepts only a clean checkout at that commit and archives only the
 tracked overlay. It requires every destination runtime file to match either the
-documented 0.1.39 base hash or the exact 0.1.41 candidate hash. Before copying,
+documented 0.1.39 base hash or the exact 0.1.42 candidate hash. Before copying,
 it creates a root-only component backup under
 `/opt/homeassistant/wyzeapi-overlay-backups`, syntax-checks all Python modules,
 parses `services.yaml`, and runs the Home Assistant configuration checker.

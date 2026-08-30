@@ -883,13 +883,13 @@ class WyzeOverlayDeploymentSecurityTests(unittest.TestCase):
         self.assertIn("test \"$current\" = \"${base_hashes[$name]}\"", self.text)
         self.assertIn("predecessor_hashes", self.text)
         for predecessor_hash in (
-            "96CE2D9B1969CAC02D4FB3F822AB5E2652CDFD2EB21CEF9FF42FF3980834708C",
-            "5977510F5AD032DEF81DDB67D1A72D11B719E7BA37860F969931F7859492CF94",
+            "1921AB036214028B63F3809EA7FE4B6DD2C4F16AD3F6F968741247D8DB311AED",
+            "6C0937ACDDB9FCE385808E86AF9DFF66383AB36ED48C72A871E006096DE15A7A",
             "24531253DC5445C3D7F16D91CD6727BA9D2DB457CD81098A0471419AD88E2140",
-            "4DC968ACFC0C66ED7AF001DC0BADD4764CB1751570DF486802ED787B20730EC2",
-            "D828A3007DD019A914256DA2664F584A2BDF6CA8A8C6B7654F3B4E6B9A83F0D5",
+            "CC5FEFBA7564F81BBDC6BFAD3FE99C883ACF818F49BFCF0878312D41E324DB6B",
+            "8A19F358735444A72D816BDFF0E75D3FD653FB41EF660CA606E3BAE7E99294C2",
             "95D9B4FFDDFE3199C6C98B62D30338350DAA8E5F6F29C1E501E2BDB53AF604BA",
-            "03F5A037D81FAA0B8AA915F4106D87195DCEC043999669F7EA159F2233E5459B",
+            "78AF1900649BBB53DC074F66B998C8F5EBFC16AA924B59BA6D788B7F04BA0E08",
         ):
             self.assertIn(predecessor_hash, self.text)
         self.assertIn("printf '%s  %s", self.text)
@@ -954,7 +954,7 @@ class WyzeOverlayDeploymentSecurityTests(unittest.TestCase):
             r"api/services/wyzeapi/(?:run_sprinkler|stop_sprinkler|refresh_sprinkler)",
         )
         self.assertIn("?return_response", self.text)
-        self.assertIn('item.get("integration_version") == "0.1.41"', self.text)
+        self.assertIn('item.get("integration_version") == "0.1.42"', self.text)
 
     def test_main_deploy_orders_overlay_before_mcp_release(self) -> None:
         main = (ROOT / "scripts" / "deploy-production.ps1").read_text(encoding="utf-8")
