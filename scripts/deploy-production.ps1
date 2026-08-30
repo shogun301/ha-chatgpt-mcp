@@ -951,7 +951,7 @@ Start-Sleep -Seconds 1200
             (($failsafeBody -replace "`r`n", "`n") + "`n"),
             [Text.UTF8Encoding]::new($false)
         )
-        $sshFailsafeProcess = Start-Process -FilePath 'powershell.exe' `
+        $sshFailsafeProcess = Start-Process -FilePath 'pwsh' `
             -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $sshFailsafePath) `
             -WindowStyle Hidden -PassThru
         $targetAddress = $access.accessDetails.ipAddress

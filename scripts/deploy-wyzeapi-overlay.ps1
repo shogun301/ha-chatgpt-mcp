@@ -531,7 +531,7 @@ Start-Sleep -Seconds 1200
 & '$awsExe' lightsail close-instance-public-ports --profile '$AwsProfile' --region '$AwsRegion' --instance-name '$InstanceName' --port-info 'fromPort=22,toPort=22,protocol=tcp,cidrs=$temporarySshCidr' --output json | Out-Null
 "@
     [IO.File]::WriteAllText($failsafePath, $failsafeBody, [Text.UTF8Encoding]::new($false))
-    $failsafeProcess = Start-Process -FilePath 'powershell.exe' `
+    $failsafeProcess = Start-Process -FilePath 'pwsh' `
         -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $failsafePath) `
         -WindowStyle Hidden -PassThru
 
