@@ -5,11 +5,20 @@ param(
     [Parameter(Mandatory)][string]$InstanceName,
     [Parameter(Mandatory)][ValidatePattern('^https://')][string]$PublicFrontendUrl,
     [Parameter(Mandatory)][ValidatePattern('^https://')][string]$PublicMcpUrl,
+    [string]$SshAddress,
     [switch]$PreflightOnly,
     [switch]$ReuseVerifiedWyzeOverlay
 )
 
 $ErrorActionPreference = 'Stop'
+
+$parsedSshAddress = $null
+if ($SshAddress -and (
+    -not [Net.IPAddress]::TryParse($SshAddress, [ref]$parsedSshAddress) -or
+    $parsedSshAddress.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork
+)) {
+    throw 'SshAddress must be a literal IPv4 address.'
+}
 
 $releaseVersion = '2.7.3'
 $sourceRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
@@ -916,35 +925,39 @@ try {
     & "$env:SystemRoot\System32\icacls.exe" $keyPath '/inheritance:r' '/grant:r' "*$sid`:(F)" | Out-Null
     & "$env:SystemRoot\System32\icacls.exe" $certPath '/inheritance:r' '/grant:r' "*$sid`:(F)" | Out-Null
 
-    $currentIp = (Invoke-RestMethod -Uri 'https://checkip.amazonaws.com').Trim()
-    $parsedIp = $null
-    if (-not [Net.IPAddress]::TryParse($currentIp, [ref]$parsedIp)) {
-        throw 'Could not determine the current public IP.'
-    }
-    $temporarySshCidr = "$currentIp/32"
-    & $awsExe lightsail open-instance-public-ports --profile $AwsProfile --region $AwsRegion `
-        --instance-name $InstanceName `
-        --port-info "fromPort=22,toPort=22,protocol=tcp,cidrs=$temporarySshCidr" --output json | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'Could not open temporary SSH access.' }
-    $firewallOpened = $true
+    $targetAddress = $SshAddress
+    if (-not $targetAddress) {
+        $currentIp = (Invoke-RestMethod -Uri 'https://checkip.amazonaws.com').Trim()
+        $parsedIp = $null
+        if (-not [Net.IPAddress]::TryParse($currentIp, [ref]$parsedIp)) {
+            throw 'Could not determine the current public IP.'
+        }
+        $temporarySshCidr = "$currentIp/32"
+        & $awsExe lightsail open-instance-public-ports --profile $AwsProfile --region $AwsRegion `
+            --instance-name $InstanceName `
+            --port-info "fromPort=22,toPort=22,protocol=tcp,cidrs=$temporarySshCidr" --output json | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'Could not open temporary SSH access.' }
+        $firewallOpened = $true
 
-    # A detached, bounded fail-safe closes this exact /32 even if the parent
-    # process is terminated so abruptly that PowerShell cannot execute finally.
-    $failsafeBody = @"
+        # A detached, bounded fail-safe closes this exact /32 even if the parent
+        # process is terminated so abruptly that PowerShell cannot execute finally.
+        $failsafeBody = @"
 `$ErrorActionPreference = 'SilentlyContinue'
 Start-Sleep -Seconds 1200
 & '$awsExe' lightsail close-instance-public-ports --profile '$AwsProfile' --region '$AwsRegion' --instance-name '$InstanceName' --port-info 'fromPort=22,toPort=22,protocol=tcp,cidrs=$temporarySshCidr' --output json | Out-Null
 "@
-    [IO.File]::WriteAllText(
-        $sshFailsafePath,
-        (($failsafeBody -replace "`r`n", "`n") + "`n"),
-        [Text.UTF8Encoding]::new($false)
-    )
-    $sshFailsafeProcess = Start-Process -FilePath 'powershell.exe' `
-        -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $sshFailsafePath) `
-        -WindowStyle Hidden -PassThru
+        [IO.File]::WriteAllText(
+            $sshFailsafePath,
+            (($failsafeBody -replace "`r`n", "`n") + "`n"),
+            [Text.UTF8Encoding]::new($false)
+        )
+        $sshFailsafeProcess = Start-Process -FilePath 'powershell.exe' `
+            -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $sshFailsafePath) `
+            -WindowStyle Hidden -PassThru
+        $targetAddress = $access.accessDetails.ipAddress
+    }
 
-    $target = "$($access.accessDetails.username)@$($access.accessDetails.ipAddress)"
+    $target = "$($access.accessDetails.username)@$targetAddress"
     $sshOptions = @(
         '-i', $keyPath,
         '-o', 'BatchMode=yes',

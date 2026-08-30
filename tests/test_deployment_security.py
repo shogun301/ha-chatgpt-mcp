@@ -624,6 +624,15 @@ class DeploymentScriptSecurityTests(unittest.TestCase):
     def test_only_temporary_current_ip_ssh_firewall_is_changed(self) -> None:
         self.assertEqual(self.text.count("open-instance-public-ports"), 1)
         self.assertEqual(self.text.count("close-instance-public-ports"), 2)
+        self.assertIn("[string]$SshAddress", self.text)
+        self.assertIn("SshAddress must be a literal IPv4 address.", self.text)
+        self.assertRegex(
+            self.text,
+            r"(?s)\$targetAddress\s*=\s*\$SshAddress\s*if \(-not \$targetAddress\) \{.+?open-instance-public-ports.+?\$targetAddress\s*=\s*\$access\.accessDetails\.ipAddress\s*\}",
+        )
+        self.assertIn(
+            '$target = "$($access.accessDetails.username)@$targetAddress"', self.text
+        )
         self.assertRegex(
             self.text, r"""\$temporarySshCidr\s*=\s*["']\$currentIp/32["']"""
         )
