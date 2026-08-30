@@ -220,15 +220,22 @@ def verify_wyze_overlay(*, archive: bool) -> list[str]:
     )
     required_guards = (
         "version `0.1.39`",
-        "version `0.1.40`",
+        "version `0.1.41`",
         "8C1551778463D995413F6A71739ADC53D820DED0CB069EF08E7DBB7A6395F1BC",
         "F69AF27ABBF54435C1A978DBF791F8CDA8D8500187FE4067EE90C18D661A2950",
         "3AF7296A87C8B0EA0CDE2E98CE6A05BA81846FE8631D8DD09E5B1954E62DAC15",
+        "96CE2D9B1969CAC02D4FB3F822AB5E2652CDFD2EB21CEF9FF42FF3980834708C",
+        "5977510F5AD032DEF81DDB67D1A72D11B719E7BA37860F969931F7859492CF94",
+        "24531253DC5445C3D7F16D91CD6727BA9D2DB457CD81098A0471419AD88E2140",
+        "4DC968ACFC0C66ED7AF001DC0BADD4764CB1751570DF486802ED787B20730EC2",
+        "D828A3007DD019A914256DA2664F584A2BDF6CA8A8C6B7654F3B4E6B9A83F0D5",
+        "95D9B4FFDDFE3199C6C98B62D30338350DAA8E5F6F29C1E501E2BDB53AF604BA",
+        "03F5A037D81FAA0B8AA915F4106D87195DCEC043999669F7EA159F2233E5459B",
     )
     for literal in required_guards:
         if literal not in readme:
             raise AssertionError(f"Wyze overlay base guard is missing {literal}")
-    if manifest.get("domain") != "wyzeapi" or manifest.get("version") != "0.1.40":
+    if manifest.get("domain") != "wyzeapi" or manifest.get("version") != "0.1.41":
         raise AssertionError("Wyze overlay manifest identity is stale")
     return sorted(WYZE_OVERLAY_FILES)
 

@@ -384,12 +384,12 @@ class DeploymentScriptSecurityTests(unittest.TestCase):
             if re.match(r"^\s*(?:sudo\s+)?install\b", line):
                 cls.install_commands.append(shlex.split(line.strip(), posix=True))
 
-    def test_release_is_pinned_to_2_7_3(self) -> None:
+    def test_release_is_pinned_to_2_7_4(self) -> None:
         self.assertRegex(
             self.text,
-            r"(?m)^\s*\$releaseVersion\s*=\s*['\"]2\.7\.3['\"]\s*$",
+            r"(?m)^\s*\$releaseVersion\s*=\s*['\"]2\.7\.4['\"]\s*$",
         )
-        self.assertRegex(self.text, r"(?m)^\s*release_version=['\"]2\.7\.3['\"]\s*$")
+        self.assertRegex(self.text, r"(?m)^\s*release_version=['\"]2\.7\.4['\"]\s*$")
 
     def test_tests_run_before_main_container_recreation(self) -> None:
         main = self.text[
@@ -460,7 +460,7 @@ class DeploymentScriptSecurityTests(unittest.TestCase):
             self.text.index("stage='validating_runtime_hardening'")
         ]
         self.assertIn("for attempt in $(seq 1 180)", fixed)
-        self.assertIn('p.get("service_version") == "2.7.3"', fixed)
+        self.assertIn('p.get("service_version") == "2.7.4"', fixed)
         self.assertIn('[ "$fixed_routes_ready" -eq 1 ]', fixed)
 
     def test_retention_check_parses_full_iso_date_suffix(self) -> None:
@@ -882,7 +882,16 @@ class WyzeOverlayDeploymentSecurityTests(unittest.TestCase):
             self.assertIn(f"[{name}]", self.text)
         self.assertIn("test \"$current\" = \"${base_hashes[$name]}\"", self.text)
         self.assertIn("predecessor_hashes", self.text)
-        self.assertIn("97EBB8FABA1136F70FF00143A2CE4F37600AFDE6548EFBA972AA9DA33DA2F23D", self.text)
+        for predecessor_hash in (
+            "96CE2D9B1969CAC02D4FB3F822AB5E2652CDFD2EB21CEF9FF42FF3980834708C",
+            "5977510F5AD032DEF81DDB67D1A72D11B719E7BA37860F969931F7859492CF94",
+            "24531253DC5445C3D7F16D91CD6727BA9D2DB457CD81098A0471419AD88E2140",
+            "4DC968ACFC0C66ED7AF001DC0BADD4764CB1751570DF486802ED787B20730EC2",
+            "D828A3007DD019A914256DA2664F584A2BDF6CA8A8C6B7654F3B4E6B9A83F0D5",
+            "95D9B4FFDDFE3199C6C98B62D30338350DAA8E5F6F29C1E501E2BDB53AF604BA",
+            "03F5A037D81FAA0B8AA915F4106D87195DCEC043999669F7EA159F2233E5459B",
+        ):
+            self.assertIn(predecessor_hash, self.text)
         self.assertIn("printf '%s  %s", self.text)
         self.assertIn("sha256sum -c -", self.text)
 
@@ -945,7 +954,7 @@ class WyzeOverlayDeploymentSecurityTests(unittest.TestCase):
             r"api/services/wyzeapi/(?:run_sprinkler|stop_sprinkler|refresh_sprinkler)",
         )
         self.assertIn("?return_response", self.text)
-        self.assertIn('item.get("integration_version") == "0.1.40"', self.text)
+        self.assertIn('item.get("integration_version") == "0.1.41"', self.text)
 
     def test_main_deploy_orders_overlay_before_mcp_release(self) -> None:
         main = (ROOT / "scripts" / "deploy-production.ps1").read_text(encoding="utf-8")

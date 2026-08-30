@@ -655,7 +655,7 @@ def test_capability_contract_returns_explicit_unsupported_signals() -> None:
         assert unsupported[capability]["supported"] is False
         assert unsupported[capability]["reason"]
     assert contract["physical_state_verified"] is False
-    assert contract["integration_version"] == "0.1.40"
+    assert contract["integration_version"] == "0.1.41"
     assert "physically-measured" not in contract["evidence_labels"]
     assert "unknown native units" in supported["modeled_zone_moisture"]["semantics"]
 
@@ -681,7 +681,7 @@ def test_duration_construction_requires_one_exact_bounded_field() -> None:
         {"duration_seconds": 123, "duration_minutes": 2.05},
         {"duration_seconds": 123.5},
         {"duration_seconds": True},
-        {"duration_seconds": 59},
+        {"duration_seconds": 0},
         {"duration_seconds": 10_801},
         {"duration_minutes": 0.99},
         {"duration_minutes": 180.01},
@@ -822,6 +822,7 @@ def _load_init_service_functions():
         "SERVICE_GET_SPRINKLER_SCHEDULE_RUNS": "get_sprinkler_schedule_runs",
         "SERVICE_GET_SPRINKLER_SCHEDULES": "get_sprinkler_schedules",
         "SERVICE_GET_SPRINKLER_CAPABILITIES": "get_sprinkler_capabilities",
+        "IRRIGATION_COORDINATORS": "irrigation_coordinators",
     }
     exec(compile(module, str(source_path), "exec"), namespace)
     return namespace
@@ -1017,6 +1018,7 @@ def test_mocked_native_sequence_http_payload_preserves_exact_seconds() -> None:
     auth = Auth()
     fake = types.SimpleNamespace(
         _command_lock=AsyncLock(),
+        _managed_run_task=None,
         last_update_success=True,
         data={"connected": True, "watering": False, "endpoint_errors": []},
         _command_pending_until=0.0,
@@ -1285,6 +1287,145 @@ def test_direct_coordinator_commands_require_explicitly_enabled_zone() -> None:
     assert service_calls == []
 
 
+def test_home_assistant_owns_subminute_sequence_timing_and_stops_each_zone() -> None:
+    source_path = OVERLAY / "irrigation.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+    class_node = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef)
+        and node.name == "WyzeIrrigationCoordinator"
+    )
+    method_names = {
+        "async_start_sequence",
+        "_async_complete_managed_runs",
+        "_async_managed_stop",
+        "_async_wait_for_idle",
+    }
+    methods = [
+        node
+        for node in class_node.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name in method_names
+    ]
+    namespace = {
+        "Any": object,
+        "HomeAssistantError": RuntimeError,
+        "QUICKRUN_URL": "unused",
+        "asyncio": asyncio,
+        "datetime": datetime,
+        "timedelta": __import__("datetime").timedelta,
+        "timezone": timezone,
+        "time": time,
+        "json": json,
+        "olive_create_signature": lambda *args: "unused",
+        "check_for_errors_iot": lambda *args: None,
+        "APP_INFO": "unused",
+        "OLIVE_APP_ID": "unused",
+        "PHONE_ID": "unused",
+        "validate_sequence": data.validate_sequence,
+        "_LOGGER": types.SimpleNamespace(error=lambda *args, **kwargs: None),
+    }
+    exec(
+        compile(
+            ast.fix_missing_locations(ast.Module(body=methods, type_ignores=[])),
+            str(source_path),
+            "exec",
+        ),
+        namespace,
+    )
+
+    class AsyncLock:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    calls = []
+    statuses = []
+
+    async def start_zone(device, zone, seconds):
+        calls.append(("start", zone, seconds))
+
+    async def stop_running_schedule(device):
+        calls.append(("stop",))
+
+    async def no_op():
+        return None
+
+    fake = types.SimpleNamespace(
+        _command_lock=AsyncLock(),
+        _command_pending_until=0.0,
+        _managed_run_task=None,
+        last_update_success=True,
+        data={
+            "connected": True,
+            "watering": False,
+            "active_zone_number": None,
+            "endpoint_errors": [],
+            "zones": [
+                {"zone_number": 1, "enabled": True},
+                {"zone_number": 2, "enabled": True},
+                {"zone_number": 3, "enabled": True},
+            ],
+        },
+        enabled_zone_numbers={1, 2, 3},
+        device=types.SimpleNamespace(nickname="Controller"),
+        service=types.SimpleNamespace(
+            start_zone=start_zone,
+            stop_running_schedule=stop_running_schedule,
+        ),
+        hass=types.SimpleNamespace(
+            async_create_task=lambda coroutine, name: asyncio.create_task(
+                coroutine, name=name
+            )
+        ),
+        async_refresh=no_op,
+        async_request_refresh=no_op,
+        _command_zone_identity=lambda zone: {"zone_number": zone},
+        _set_command_pending=lambda action, command_id=None, **details: statuses.append(
+            (action, command_id, details)
+        ),
+    )
+    for name in method_names:
+        setattr(fake, name, types.MethodType(namespace[name], fake))
+
+    original_sleep = namespace["asyncio"].sleep
+
+    async def immediate_sleep(_seconds):
+        return None
+
+    async def exercise():
+        namespace["asyncio"].sleep = immediate_sleep
+        try:
+            await fake.async_start_sequence(
+                [
+                    {"zone": 1, "duration_seconds": 20},
+                    {"zone": 2, "duration_seconds": 20},
+                    {"zone": 3, "duration_seconds": 20},
+                ],
+                command_id="mcp-command-subminute",
+            )
+            task = fake._managed_run_task
+            assert task is not None
+            await task
+        finally:
+            namespace["asyncio"].sleep = original_sleep
+
+    asyncio.run(exercise())
+    assert calls == [
+        ("start", 1, 60),
+        ("stop",),
+        ("start", 2, 60),
+        ("stop",),
+        ("start", 3, 60),
+        ("stop",),
+    ]
+    assert statuses[0][2]["managed_by_home_assistant"] is True
+    assert statuses[0][2]["zones"][0]["duration_seconds"] == 20
+    assert statuses[0][2]["zones"][0]["provider_duration_seconds"] == 60
+
+
 def test_schedule_get_and_response_service_construction_are_read_only() -> None:
     irrigation_source = (OVERLAY / "irrigation.py").read_text(encoding="utf-8")
     init_source = (OVERLAY / "__init__.py").read_text(encoding="utf-8")
@@ -1324,7 +1465,7 @@ def test_overlay_manifest_and_base_guard_are_deterministic() -> None:
     readme = (OVERLAY.parents[1] / "README.md").read_text(encoding="utf-8")
 
     assert manifest["domain"] == "wyzeapi"
-    assert manifest["version"] == "0.1.40"
+    assert manifest["version"] == "0.1.41"
     for filename in (
         "manifest.json",
         "__init__.py",

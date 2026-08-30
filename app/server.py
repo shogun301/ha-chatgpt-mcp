@@ -102,7 +102,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 LOGGER = logging.getLogger("ha_chatgpt_mcp")
-SERVER_VERSION = "2.7.3"
+SERVER_VERSION = "2.7.4"
 audit = AuditLog(config.AUDIT_LOG_PATH)
 oauth = OAuthServer(
     OAuthStore(config.DATABASE_PATH),
@@ -520,7 +520,7 @@ class SprinklerExactSequenceEntry(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     zone_id: Annotated[str, Field(pattern=r"^zone-[1-8]$")]
-    duration_seconds: Annotated[int, Field(strict=True, ge=60, le=10_800)]
+    duration_seconds: Annotated[int, Field(strict=True, ge=1, le=10_800)]
 
 
 mcp = RedactingMCPServer(
@@ -4688,8 +4688,8 @@ async def get_sprinkler_capabilities() -> SprinklerCapabilities:
             supported=True,
             operations=["command"],
             evidence="commanded",
-            semantics="One enabled zone for an integer 60 through 10800 seconds after explicit confirmation.",
-            upstream_source="Wyze irrigation quickrun",
+            semantics="One enabled zone for an integer 1 through 10800 seconds after explicit confirmation; Home Assistant owns sub-minute timing and stop.",
+            upstream_source="Home Assistant Wyze irrigation service",
         ),
         CapabilityItem(
             capability="multi_zone_quick_run",
@@ -5393,7 +5393,7 @@ async def run_sprinkler_sequence(
 @mcp.tool(title="Run sprinkler zone for exact seconds", annotations=DESTRUCTIVE_WRITE)
 async def run_sprinkler_zone_exact(
     zone_id: Annotated[str, Field(pattern=r"^zone-[1-8]$")],
-    duration_seconds: Annotated[int, Field(strict=True, ge=60, le=10_800)],
+    duration_seconds: Annotated[int, Field(strict=True, ge=1, le=10_800)],
     confirmed: bool = False,
 ) -> SprinklerCommandResult:
     """Start one exact enabled zone for an integer number of seconds."""

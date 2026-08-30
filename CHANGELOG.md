@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.7.4 - 2026-08-29
+
+- Accept exact sprinkler durations from 1 through 10800 seconds in the typed MCP and Home Assistant service schemas.
+- Make Home Assistant own sub-minute timing: it sends the provider's 60-second minimum, stops at the requested second, verifies controller-reported idle, and only then advances a managed sequence.
+- Cancel and stop any active HA-timed run when the integration unloads; a Home Assistant outage remains bounded by the provider's 60-second command.
+
 ## 2.7.3 - 2026-08-29
 
 - Permit Wyze native 12-digit device/zone identifiers in sprinkler acceptance while continuing to reject contextual AWS account IDs, credentials, IPs, and home paths.

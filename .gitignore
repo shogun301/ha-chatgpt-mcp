@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .wrangler/
+*.egg-info/
 
 .env
 .env.*

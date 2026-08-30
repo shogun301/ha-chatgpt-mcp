@@ -43,7 +43,7 @@ unrestricted service proxy.
 - **OAuth-native remote access:** authorization code flow with S256 PKCE,
   dynamic client registration, scoped access tokens, and MCP resource metadata.
 
-Version **2.7.3** currently advertises **107 tools**. See
+Version **2.7.4** currently advertises **107 tools**. See
 [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## Architecture
@@ -184,7 +184,9 @@ adds four response-only services and preserves exact native identifiers while
 normalizing zones as `zone-1` through `zone-8`. Every sprinkler output labels
 its evidence as commanded, controller-reported, calculated, inferred, or
 physically measured. Current state is never described as physical valve-open
-feedback. See the
+feedback. Exact 1-59-second requests are timed inside Home Assistant: the
+integration sends the provider's 60-second minimum, stops at the requested
+second, and requires controller-reported idle before advancing a sequence. See the
 [capability matrix](docs/wyze-sprinkler-capability-matrix.md) for confirmed
 semantics and upstream limits.
 

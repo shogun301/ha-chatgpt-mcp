@@ -1004,9 +1004,9 @@ def duration_seconds_from_fields(value: Any) -> int:
         )
     if present[0] == "duration_seconds":
         seconds = _strict_integer(entry["duration_seconds"])
-        if seconds is None or seconds < 60 or seconds > 10_800:
+        if seconds is None or seconds < 1 or seconds > 10_800:
             raise ValueError(
-                "duration_seconds must be an exact integer from 60 through 10800"
+                "duration_seconds must be an exact integer from 1 through 10800"
             )
         return seconds
     minutes = _number(entry["duration_minutes"])
@@ -1333,13 +1333,13 @@ def sprinkler_capabilities() -> dict[str, Any]:
             "capability": "start_zone",
             "supported": True,
             "access": "command",
-            "semantics": "one enabled zone for an exact 60 through 10800 seconds",
+            "semantics": "one enabled zone for an exact 1 through 10800 seconds; Home Assistant times and stops sub-minute runs",
         },
         {
             "capability": "start_sequence",
             "supported": True,
             "access": "command",
-            "semantics": "ordered native quick-run of enabled zones, total at most 180 minutes",
+            "semantics": "ordered enabled-zone run; Home Assistant times, stops, and verifies idle between zones when any duration is sub-minute",
         },
         {
             "capability": "stop_watering",
@@ -1386,7 +1386,7 @@ def sprinkler_capabilities() -> dict[str, Any]:
         },
     ]
     return {
-        "integration_version": "0.1.40",
+        "integration_version": "0.1.41",
         "supported": supported,
         "unsupported": unsupported,
         "evidence_labels": [

@@ -149,6 +149,10 @@ class SprinklerContractTests(unittest.TestCase):
             command_zone["properties"]["duration_seconds"]["anyOf"][0]["type"],
             "integer",
         )
+        exact_input = tools["run_sprinkler_zone_exact"].input_schema
+        self.assertEqual(
+            exact_input["properties"]["duration_seconds"]["minimum"], 1
+        )
 
     def test_exact_zone_command_constructs_native_integer_seconds(self) -> None:
         token = claims_context.set({"scope": "mcp:read mcp:write"})
@@ -174,18 +178,18 @@ class SprinklerContractTests(unittest.TestCase):
                     "app.server.ha.call_service", new=AsyncMock(return_value=[])
                 ) as service,
             ):
-                result = asyncio.run(run_sprinkler_zone_exact("zone-1", 61, True))
+                result = asyncio.run(run_sprinkler_zone_exact("zone-1", 20, True))
         finally:
             claims_context.reset(token)
         service_data = service.await_args.args[2]
         self.assertEqual(service.await_args.args[:2], ("wyzeapi", "run_sprinkler_zone"))
         self.assertEqual(service_data["device_id"], ["device-registry-id"])
         self.assertEqual(service_data["zone"], 1)
-        self.assertEqual(service_data["duration_seconds"], 61)
+        self.assertEqual(service_data["duration_seconds"], 20)
         self.assertEqual(service_data["command_id"], result.command_id)
         self.assertEqual(result.evidence, "commanded")
         self.assertFalse(result.physical_state_verified)
-        self.assertEqual(result.zones[0].duration_seconds, 61)
+        self.assertEqual(result.zones[0].duration_seconds, 20)
 
     def test_exact_sequence_constructs_ordered_unique_seconds(self) -> None:
         token = claims_context.set({"scope": "mcp:read mcp:write"})

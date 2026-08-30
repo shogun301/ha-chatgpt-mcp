@@ -78,6 +78,7 @@ class WyzeIrrigationCoordinator(DataUpdateCoordinator):
         self._info_response: dict[str, Any] = {}
         self._schedule_response: dict[str, Any] = {}
         self._command_lock = asyncio.Lock()
+        self._managed_run_task: asyncio.Task[None] | None = None
         self._failed_endpoints: set[str] = set()
         self._known_zone_numbers: set[int] | None = None
         self._command_pending_until = 0.0
@@ -340,8 +341,8 @@ class WyzeIrrigationCoordinator(DataUpdateCoordinator):
         command_id: str | None = None,
     ) -> None:
         """Start one enabled zone after validating safe bounds."""
-        if duration_seconds < 60 or duration_seconds > 10_800:
-            raise HomeAssistantError("Duration must be between 1 and 180 minutes")
+        if duration_seconds < 1 or duration_seconds > 10_800:
+            raise HomeAssistantError("Duration must be between 1 second and 180 minutes")
         async with self._command_lock:
             await self.async_refresh()
             if not self.last_update_success or not (self.data or {}).get("connected"):
@@ -366,13 +367,21 @@ class WyzeIrrigationCoordinator(DataUpdateCoordinator):
                 raise HomeAssistantError(
                     "Current live sprinkler watering state is unavailable"
                 )
-            if watering or self._command_pending_until > time.monotonic():
+            if (
+                watering
+                or self._command_pending_until > time.monotonic()
+                or (
+                    self._managed_run_task is not None
+                    and not self._managed_run_task.done()
+                )
+            ):
                 raise HomeAssistantError(
                     "A sprinkler run is already active; stop it before starting another"
                 )
             try:
+                provider_duration_seconds = max(60, duration_seconds)
                 await self.service.start_zone(
-                    self.device, zone_number, duration_seconds
+                    self.device, zone_number, provider_duration_seconds
                 )
             except Exception as err:
                 raise HomeAssistantError(
@@ -383,8 +392,32 @@ class WyzeIrrigationCoordinator(DataUpdateCoordinator):
                 command_id=command_id,
                 **self._command_zone_identity(zone_number),
                 duration_seconds=duration_seconds,
+                provider_duration_seconds=provider_duration_seconds,
+                automatic_stop=duration_seconds < 60,
+                scheduled_stop_at=(
+                    (
+                        datetime.now(timezone.utc)
+                        + timedelta(seconds=duration_seconds)
+                    ).isoformat()
+                    if duration_seconds < 60
+                    else None
+                ),
             )
             await self.async_request_refresh()
+            if duration_seconds < 60:
+                self._managed_run_task = self.hass.async_create_task(
+                    self._async_complete_managed_runs(
+                        [
+                            {
+                                "zone_number": zone_number,
+                                "duration": duration_seconds,
+                            }
+                        ],
+                        command_id,
+                        first_zone_started=True,
+                    ),
+                    f"Stop Wyze sprinkler zone {zone_number} after {duration_seconds} seconds",
+                )
 
     async def async_force_full_refresh(self) -> None:
         """Refresh live state plus zone/config metadata immediately."""
@@ -421,10 +454,57 @@ class WyzeIrrigationCoordinator(DataUpdateCoordinator):
                 raise HomeAssistantError(
                     "Current live sprinkler watering state is unavailable"
                 )
-            if watering or self._command_pending_until > time.monotonic():
+            if (
+                watering
+                or self._command_pending_until > time.monotonic()
+                or (
+                    self._managed_run_task is not None
+                    and not self._managed_run_task.done()
+                )
+            ):
                 raise HomeAssistantError(
                     "A sprinkler run is already active; stop it before starting another"
                 )
+            if any(run["duration"] < 60 for run in runs):
+                first = runs[0]
+                provider_duration_seconds = max(60, first["duration"])
+                try:
+                    await self.service.start_zone(
+                        self.device,
+                        first["zone_number"],
+                        provider_duration_seconds,
+                    )
+                except Exception as err:
+                    raise HomeAssistantError(
+                        f"Unable to start zone {first['zone_number']}: {err}"
+                    ) from err
+                command_zones = [
+                    {
+                        **self._command_zone_identity(run["zone_number"]),
+                        "duration_seconds": run["duration"],
+                        "provider_duration_seconds": max(60, run["duration"]),
+                    }
+                    for run in runs
+                ]
+                self._set_command_pending(
+                    "start_sequence",
+                    command_id=command_id,
+                    zones=command_zones,
+                    managed_by_home_assistant=True,
+                    current_zone_number=first["zone_number"],
+                    scheduled_stop_at=(
+                        datetime.now(timezone.utc)
+                        + timedelta(seconds=first["duration"])
+                    ).isoformat(),
+                )
+                await self.async_request_refresh()
+                self._managed_run_task = self.hass.async_create_task(
+                    self._async_complete_managed_runs(
+                        runs, command_id, first_zone_started=True
+                    ),
+                    "Run Home Assistant-timed Wyze sprinkler sequence",
+                )
+                return
             await self.service._auth_lib.refresh_if_should()
             payload = {
                 "device_id": self.device.mac,
@@ -464,8 +544,99 @@ class WyzeIrrigationCoordinator(DataUpdateCoordinator):
             )
             await self.async_request_refresh()
 
+    async def _async_complete_managed_runs(
+        self,
+        runs: list[dict[str, int]],
+        command_id: str | None,
+        *,
+        first_zone_started: bool,
+    ) -> None:
+        """Time exact runs in Home Assistant and stop between every zone."""
+        current_task = asyncio.current_task()
+        try:
+            for index, run in enumerate(runs):
+                if index > 0 or not first_zone_started:
+                    async with self._command_lock:
+                        provider_duration_seconds = max(60, run["duration"])
+                        await self.service.start_zone(
+                            self.device,
+                            run["zone_number"],
+                            provider_duration_seconds,
+                        )
+                        self._set_command_pending(
+                            "start_sequence",
+                            command_id=command_id,
+                            zones=[
+                                {
+                                    **self._command_zone_identity(run["zone_number"]),
+                                    "duration_seconds": run["duration"],
+                                    "provider_duration_seconds": provider_duration_seconds,
+                                }
+                            ],
+                            managed_by_home_assistant=True,
+                            current_zone_number=run["zone_number"],
+                            scheduled_stop_at=(
+                                datetime.now(timezone.utc)
+                                + timedelta(seconds=run["duration"])
+                            ).isoformat(),
+                        )
+                        await self.async_request_refresh()
+                await asyncio.sleep(run["duration"])
+                await self._async_managed_stop(command_id)
+                await self._async_wait_for_idle()
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:
+            _LOGGER.error(
+                "Home Assistant-timed sprinkler run failed for %s: %s",
+                self.device.nickname,
+                err,
+            )
+            try:
+                await self._async_managed_stop(command_id)
+            except Exception as stop_err:
+                _LOGGER.error(
+                    "Unable to stop failed Home Assistant-timed sprinkler run for %s: %s",
+                    self.device.nickname,
+                    stop_err,
+                )
+        finally:
+            if self._managed_run_task is current_task:
+                self._managed_run_task = None
+
+    async def _async_managed_stop(self, command_id: str | None) -> None:
+        """Issue the provider stop without cancelling the task that owns the timer."""
+        async with self._command_lock:
+            await self.service.stop_running_schedule(self.device)
+            self._set_command_pending(
+                "stop",
+                command_id=command_id,
+                automatic_stop=True,
+            )
+            await self.async_request_refresh()
+
+    async def _async_wait_for_idle(self) -> None:
+        """Require controller-reported idle before advancing a managed sequence."""
+        for _ in range(30):
+            await self.async_refresh()
+            if (self.data or {}).get("watering") is False and (
+                self.data or {}
+            ).get("active_zone_number") is None:
+                return
+            await asyncio.sleep(1)
+        raise HomeAssistantError(
+            "Controller idle was not verified after the automatic stop"
+        )
+
     async def async_stop(self, command_id: str | None = None) -> None:
         """Stop the controller's currently running schedule."""
+        managed_task = self._managed_run_task
+        if managed_task is not None and managed_task is not asyncio.current_task():
+            managed_task.cancel()
+            try:
+                await managed_task
+            except asyncio.CancelledError:
+                pass
         async with self._command_lock:
             try:
                 await self.service.stop_running_schedule(self.device)
@@ -473,6 +644,11 @@ class WyzeIrrigationCoordinator(DataUpdateCoordinator):
                 raise HomeAssistantError(f"Unable to stop sprinkler: {err}") from err
             self._set_command_pending("stop", command_id=command_id)
             await self.async_request_refresh()
+
+    async def async_shutdown(self) -> None:
+        """Fail closed by stopping any HA-timed run during integration unload."""
+        if self._managed_run_task is not None:
+            await self.async_stop(command_id="integration-unload")
 
 
 class WyzeIrrigationCoordinatorEntity(CoordinatorEntity):
