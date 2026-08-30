@@ -476,6 +476,70 @@ def test_snapshot_keeps_watering_unknown_without_explicit_controller_evidence() 
     }
 
 
+def test_snapshot_treats_controller_past_schedule_as_finished() -> None:
+    snapshot = data.normalize_snapshot(
+        {"data": {"props": {"iot_state": "connected"}}},
+        {"data": {"zones": [{"zone_number": 3, "name": "Front Yard 3"}]}},
+        {},
+        {
+            "data": {
+                "schedule_runs": [
+                    {
+                        "program_id": "App Quick Run",
+                        "schedule_state": "past",
+                        "zone_runs": [
+                            {
+                                "zone_number": 3,
+                                "status": "past",
+                                "start_time_utc": "2026-08-30T05:34:29Z",
+                                "complete_time_utc": "2026-08-30T05:34:41Z",
+                                "duration": 12,
+                            }
+                        ],
+                    }
+                ]
+            }
+        },
+        datetime(2026, 8, 30, 5, 35, tzinfo=timezone.utc),
+    )
+    assert snapshot["watering"] is False
+    assert snapshot["active_zone_number"] is None
+    assert snapshot["watering_state"] == {
+        "state": "idle",
+        "evidence_type": "inferred",
+        "physical_state_verified": False,
+    }
+
+
+def test_running_child_overrides_contradictory_past_parent_state() -> None:
+    snapshot = data.normalize_snapshot(
+        {"data": {"props": {"iot_state": "connected"}}},
+        {"data": {"zones": [{"zone_number": 3, "name": "Front Yard 3"}]}},
+        {},
+        {
+            "data": {
+                "schedule_runs": [
+                    {
+                        "schedule_state": "past",
+                        "zone_runs": [
+                            {
+                                "zone_number": 3,
+                                "status": "running",
+                                "start_time_utc": "2026-08-30T05:34:29Z",
+                                "duration": 480,
+                            }
+                        ],
+                    }
+                ]
+            }
+        },
+        datetime(2026, 8, 30, 5, 35, tzinfo=timezone.utc),
+    )
+    assert snapshot["watering"] is True
+    assert snapshot["active_zone_number"] == 3
+    assert snapshot["watering_state"]["evidence_type"] == "controller-reported"
+
+
 def test_snapshot_keeps_connectivity_unknown_without_iot_state_evidence() -> None:
     snapshot = data.normalize_snapshot(
         {"data": {"props": {}}},
@@ -655,7 +719,7 @@ def test_capability_contract_returns_explicit_unsupported_signals() -> None:
         assert unsupported[capability]["supported"] is False
         assert unsupported[capability]["reason"]
     assert contract["physical_state_verified"] is False
-    assert contract["integration_version"] == "0.1.42"
+    assert contract["integration_version"] == "0.1.43"
     assert "physically-measured" not in contract["evidence_labels"]
     assert "unknown native units" in supported["modeled_zone_moisture"]["semantics"]
 
@@ -1298,7 +1362,6 @@ def test_home_assistant_owns_subminute_sequence_timing_and_stops_each_zone() -> 
     )
     method_names = {
         "async_start_sequence",
-        "_async_prepare_managed_run",
         "_async_complete_managed_runs",
         "_async_managed_stop",
         "_async_wait_for_idle",
@@ -1344,12 +1407,24 @@ def test_home_assistant_owns_subminute_sequence_timing_and_stops_each_zone() -> 
 
     calls = []
     statuses = []
+    controller = {"stop_requested": False, "fail_post_stop_refresh": False}
 
     async def start_zone(device, zone, seconds):
         calls.append(("start", zone, seconds))
 
     async def stop_running_schedule(device):
         calls.append(("stop",))
+        controller["stop_requested"] = True
+
+    async def refresh():
+        if controller["stop_requested"]:
+            if controller["fail_post_stop_refresh"]:
+                fake.last_update_success = False
+                return
+            controller["stop_requested"] = False
+            fake.data["watering"] = False
+            fake.data["active_zone_number"] = None
+        fake.last_update_success = True
 
     async def no_op():
         return None
@@ -1381,7 +1456,7 @@ def test_home_assistant_owns_subminute_sequence_timing_and_stops_each_zone() -> 
                 coroutine, name=name
             )
         ),
-        async_refresh=no_op,
+        async_refresh=refresh,
         async_request_refresh=no_op,
         _command_zone_identity=lambda zone: {"zone_number": zone},
         _set_command_pending=lambda action, command_id=None, **details: statuses.append(
@@ -1399,6 +1474,37 @@ def test_home_assistant_owns_subminute_sequence_timing_and_stops_each_zone() -> 
     async def exercise():
         namespace["asyncio"].sleep = immediate_sleep
         try:
+            try:
+                await fake.async_start_sequence(
+                    [{"zone": 1, "duration_seconds": 20}],
+                    command_id="must-not-mutate-while-unknown",
+                )
+            except RuntimeError as err:
+                assert "watering state is unavailable" in str(err)
+            else:
+                raise AssertionError("sub-minute run accepted unknown watering state")
+            assert calls == []
+            fake.data["watering"] = False
+            controller["fail_post_stop_refresh"] = True
+            await fake.async_start_sequence(
+                [
+                    {"zone": 1, "duration_seconds": 20},
+                    {"zone": 2, "duration_seconds": 20},
+                ],
+                command_id="must-not-advance-on-failed-refresh",
+            )
+            failed_task = fake._managed_run_task
+            assert failed_task is not None
+            await failed_task
+            assert ("start", 2, 60) not in calls
+            assert fake.last_update_success is False
+
+            calls.clear()
+            statuses.clear()
+            controller["stop_requested"] = False
+            controller["fail_post_stop_refresh"] = False
+            fake.last_update_success = True
+            fake.data["watering"] = False
             await fake.async_start_sequence(
                 [
                     {"zone": 1, "duration_seconds": 20},
@@ -1415,7 +1521,6 @@ def test_home_assistant_owns_subminute_sequence_timing_and_stops_each_zone() -> 
 
     asyncio.run(exercise())
     assert calls == [
-        ("stop",),
         ("start", 1, 60),
         ("stop",),
         ("start", 2, 60),
@@ -1467,7 +1572,7 @@ def test_overlay_manifest_and_base_guard_are_deterministic() -> None:
     readme = (OVERLAY.parents[1] / "README.md").read_text(encoding="utf-8")
 
     assert manifest["domain"] == "wyzeapi"
-    assert manifest["version"] == "0.1.42"
+    assert manifest["version"] == "0.1.43"
     for filename in (
         "manifest.json",
         "__init__.py",

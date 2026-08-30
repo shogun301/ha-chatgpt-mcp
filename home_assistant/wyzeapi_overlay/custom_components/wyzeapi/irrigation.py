@@ -201,16 +201,6 @@ class WyzeIrrigationCoordinator(DataUpdateCoordinator):
             result["zone_name"] = zone["name"]
         return result
 
-    async def _async_prepare_managed_run(self) -> None:
-        """Establish an idle provider state when live watering telemetry is unsupported."""
-        try:
-            await self.service.stop_running_schedule(self.device)
-        except Exception as err:
-            raise HomeAssistantError(
-                f"Unable to establish idle sprinkler state before managed run: {err}"
-            ) from err
-        await self.async_request_refresh()
-
     async def _async_update_data(self) -> dict[str, Any]:
         """Refresh status/history every minute and static metadata every 15 minutes."""
         refresh_slow = not self._zone_response or self._slow_refresh_count >= 15
@@ -373,14 +363,8 @@ class WyzeIrrigationCoordinator(DataUpdateCoordinator):
             }:
                 raise HomeAssistantError("Current live sprinkler state is incomplete")
             watering = (self.data or {}).get("watering")
-            if watering is None:
-                if duration_seconds >= 60:
-                    raise HomeAssistantError(
-                        "Current live sprinkler watering state is unavailable"
-                    )
-                await self._async_prepare_managed_run()
             if (
-                watering
+                watering is True
                 or self._command_pending_until > time.monotonic()
                 or (
                     self._managed_run_task is not None
@@ -389,6 +373,10 @@ class WyzeIrrigationCoordinator(DataUpdateCoordinator):
             ):
                 raise HomeAssistantError(
                     "A sprinkler run is already active; stop it before starting another"
+                )
+            if watering is None:
+                raise HomeAssistantError(
+                    "Current live sprinkler watering state is unavailable"
                 )
             try:
                 provider_duration_seconds = max(60, duration_seconds)
@@ -463,14 +451,8 @@ class WyzeIrrigationCoordinator(DataUpdateCoordinator):
                 raise HomeAssistantError(str(err)) from err
             watering = (self.data or {}).get("watering")
             managed_by_home_assistant = any(run["duration"] < 60 for run in runs)
-            if watering is None:
-                if not managed_by_home_assistant:
-                    raise HomeAssistantError(
-                        "Current live sprinkler watering state is unavailable"
-                    )
-                await self._async_prepare_managed_run()
             if (
-                watering
+                watering is True
                 or self._command_pending_until > time.monotonic()
                 or (
                     self._managed_run_task is not None
@@ -479,6 +461,10 @@ class WyzeIrrigationCoordinator(DataUpdateCoordinator):
             ):
                 raise HomeAssistantError(
                     "A sprinkler run is already active; stop it before starting another"
+                )
+            if watering is None:
+                raise HomeAssistantError(
+                    "Current live sprinkler watering state is unavailable"
                 )
             if managed_by_home_assistant:
                 first = runs[0]
@@ -598,7 +584,7 @@ class WyzeIrrigationCoordinator(DataUpdateCoordinator):
                         await self.async_request_refresh()
                 await asyncio.sleep(run["duration"])
                 await self._async_managed_stop(command_id)
-                await self._async_wait_for_idle(stop_acknowledged=True)
+                await self._async_wait_for_idle()
         except asyncio.CancelledError:
             raise
         except Exception as err:
@@ -630,22 +616,17 @@ class WyzeIrrigationCoordinator(DataUpdateCoordinator):
             )
             await self.async_request_refresh()
 
-    async def _async_wait_for_idle(self, *, stop_acknowledged: bool = False) -> None:
-        """Wait for idle, using a successful stop when live state is unsupported."""
+    async def _async_wait_for_idle(self) -> None:
+        """Wait for controller-reported or completed-run-derived idle."""
         for _ in range(30):
             await self.async_refresh()
             data = self.data or {}
-            if data.get("watering") is False and data.get("active_zone_number") is None:
-                return
             if (
-                stop_acknowledged
-                and self.last_update_success
-                and data.get("watering") is None
-                and data.get("active_zone_number") is None
+                self.last_update_success
                 and data.get("connected") is True
-                and not (
-                    set(data.get("endpoint_errors", [])) & {"iot", "schedule"}
-                )
+                and not (set(data.get("endpoint_errors", [])) & {"iot", "schedule"})
+                and data.get("watering") is False
+                and data.get("active_zone_number") is None
             ):
                 return
             await asyncio.sleep(1)

@@ -1,6 +1,6 @@
 services:
   ha-chatgpt-mcp:
-    image: ha-chatgpt-mcp:2.7.4
+    image: ha-chatgpt-mcp:2.7.5
     build:
       context: .
     container_name: ha-chatgpt-mcp

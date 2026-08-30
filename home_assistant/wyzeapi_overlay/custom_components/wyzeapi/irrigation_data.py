@@ -426,6 +426,7 @@ def _is_explicit_finished(value: Any) -> bool:
         "completed",
         "cancelled",
         "canceled",
+        "past",
         "skipped",
         "failed",
     }
@@ -699,7 +700,7 @@ def normalize_schedule(
     parent_start, parent_end, parent_expected_end, _ = _schedule_times({}, source)
 
     running_zone = None
-    inferred_running = False
+    running_state_evidence: str | None = None
     for raw, normalized in zip(zone_runs, normalized_runs):
         state = _first(raw, "state", "status")
         start_epoch = _epoch_seconds(normalized.get("started_at"))
@@ -708,6 +709,7 @@ def normalize_schedule(
         )
         if _is_running(state):
             running_zone = (raw, normalized)
+            running_state_evidence = "controller-reported"
             break
         if (
             start_epoch is not None
@@ -715,7 +717,7 @@ def normalize_schedule(
             and start_epoch <= now.timestamp() <= end_epoch
         ):
             running_zone = (raw, normalized)
-            inferred_running = True
+            running_state_evidence = "inferred"
             break
     selected_raw, selected = running_zone or (
         (zone_runs[0], normalized_runs[0]) if zone_runs else ({}, {})
@@ -724,9 +726,9 @@ def normalize_schedule(
     state_raw = _first(source, "schedule_state", "state", "status")
     state = str(state_raw).lower() if state_raw is not None else "unknown"
     state_evidence = "controller-reported" if state_raw is not None else "unsupported"
-    if inferred_running and not _is_running(state):
+    if running_zone is not None and not _is_running(state):
         state = "running"
-        state_evidence = "inferred"
+        state_evidence = running_state_evidence or "inferred"
     schedule_starts = [
         epoch
         for epoch in (_epoch_seconds(item.get("started_at")) for item in normalized_runs)
@@ -1386,7 +1388,7 @@ def sprinkler_capabilities() -> dict[str, Any]:
         },
     ]
     return {
-        "integration_version": "0.1.42",
+        "integration_version": "0.1.43",
         "supported": supported,
         "unsupported": unsupported,
         "evidence_labels": [

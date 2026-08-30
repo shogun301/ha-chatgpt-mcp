@@ -10,11 +10,11 @@ The two run services accept exactly one of `duration_seconds` or the legacy
 legacy decimal minutes are rounded to the nearest second before construction.
 For 1-59 seconds, Home Assistant commands the provider's 60-second minimum,
 owns the requested timer, and issues stop at the requested duration. It requires
-controller-reported idle before advancing when that signal is available. When
-Wyze omits live watering state, Home Assistant first sends an idempotent stop to
-establish a clean start, then uses each successful stop plus a connected,
-error-free refresh before advancing. A Home Assistant outage during that timer
-can delay the early stop, but the provider still ends at 60 seconds.
+affirmative idle before starting or advancing: either controller-reported idle
+or a controller-reported `past`/finished schedule run. Truly unknown watering
+state remains fail-closed and does not send a provider command. A Home Assistant
+outage during a sub-minute timer can delay the early stop, but the provider
+still ends at 60 seconds.
 
 ## Base guard
 
@@ -24,7 +24,7 @@ public source artifact.
 
 The base manifest reports version `0.1.39` and SHA-256
 `8C1551778463D995413F6A71739ADC53D820DED0CB069EF08E7DBB7A6395F1BC`.
-The overlay replaces it with version `0.1.42` so deployed source has a visible,
+The overlay replaces it with version `0.1.43` so deployed source has a visible,
 deterministic integration identity.
 Before deployment, require all replacement-file hashes below to match the
 destination. A mismatch is a stop-and-reinspect concurrency guard; do not copy
@@ -40,17 +40,17 @@ the overlay over a divergent integration.
 | `sensor.py` | `3AF7296A87C8B0EA0CDE2E98CE6A05BA81846FE8631D8DD09E5B1954E62DAC15` |
 | `services.yaml` | `F69AF27ABBF54435C1A978DBF791F8CDA8D8500187FE4067EE90C18D661A2950` |
 
-An upgrade from the immediately preceding overlay 0.1.41 accepts only this
-second exact hash set. These are the tracked 0.1.41 blobs from the public source
+An upgrade from the immediately preceding overlay 0.1.42 accepts only this
+second exact hash set. These are the tracked 0.1.42 blobs from the public source
 commit; accepting them does not broaden the destination-file guard.
 
-| Replacement file | Required 0.1.41 predecessor SHA-256 |
+| Replacement file | Required 0.1.42 predecessor SHA-256 |
 | --- | --- |
-| `manifest.json` | `1921AB036214028B63F3809EA7FE4B6DD2C4F16AD3F6F968741247D8DB311AED` |
+| `manifest.json` | `883757E74AD64CE2CF7EEEDC82F08226A0E291A9236CD7EED6789E67B903F267` |
 | `__init__.py` | `6C0937ACDDB9FCE385808E86AF9DFF66383AB36ED48C72A871E006096DE15A7A` |
 | `const.py` | `24531253DC5445C3D7F16D91CD6727BA9D2DB457CD81098A0471419AD88E2140` |
-| `irrigation.py` | `CC5FEFBA7564F81BBDC6BFAD3FE99C883ACF818F49BFCF0878312D41E324DB6B` |
-| `irrigation_data.py` | `8A19F358735444A72D816BDFF0E75D3FD653FB41EF660CA606E3BAE7E99294C2` |
+| `irrigation.py` | `5E9FAD575055188F50F993D1F1397480F73C55B6F694380143DD1749B7AF3044` |
+| `irrigation_data.py` | `14A678AB9AC9A95DE5F0C66D752EA62BB8C71E35F662BE017B0EAA384B03610E` |
 | `sensor.py` | `95D9B4FFDDFE3199C6C98B62D30338350DAA8E5F6F29C1E501E2BDB53AF604BA` |
 | `services.yaml` | `78AF1900649BBB53DC074F66B998C8F5EBFC16AA924B59BA6D788B7F04BA0E08` |
 

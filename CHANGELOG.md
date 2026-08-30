@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.7.5 - 2026-08-29
+
+- Recognize Wyze's controller-reported `past` schedule-run state as finished so completed quick runs produce idle telemetry and subsequent manual runs are accepted.
+- Keep truly unknown watering state fail-closed, reject retries before any provider mutation, and require affirmative idle evidence between Home Assistant-timed zones.
+
 ## 2.7.4 - 2026-08-29
 
 - Accept exact sprinkler durations from 1 through 10800 seconds in the typed MCP and Home Assistant service schemas.
