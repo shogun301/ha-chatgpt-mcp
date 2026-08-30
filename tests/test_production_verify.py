@@ -54,6 +54,7 @@ from scripts.production_mcp_verify import (
     _assert_zone_inventory,
     _transport_streams,
     _validate_sprinkler_result,
+    _verification_report,
     _verification_base_url,
 )
 
@@ -96,6 +97,36 @@ class ProductionVerifierCompatibilityTests(unittest.TestCase):
         self.assertTrue(SPRINKLER_COMMAND_TOOLS.isdisjoint(SPRINKLER_READ_REQUESTS))
         for name in SPRINKLER_COMMAND_TOOLS:
             self.assertNotIn(f'session.call_tool("{name}"', source)
+
+    def test_report_requires_every_sprinkler_read_and_live_inventory(self) -> None:
+        read_only = {
+            "diagnostic_calls": {name: False for name in DIAGNOSTIC_TOOLS},
+            "sprinkler_read_calls": {
+                name: True for name in SPRINKLER_READ_REQUESTS
+            },
+            "sprinkler_inventory": {
+                "configured_zone_count": 3,
+                "integration_zone_count": 3,
+                "normalized_zone_ids": ["zone-1", "zone-2", "zone-3"],
+            },
+            "sprinkler_command_schemas_inspected": sorted(SPRINKLER_COMMAND_TOOLS),
+        }
+        report = _verification_report(read_only, {}, {})
+        self.assertIs(report["read_only_scope"], read_only)
+        self.assertTrue(report["insufficient_scope_rejected"])
+
+        missing_read = dict(read_only)
+        missing_read["sprinkler_read_calls"] = dict(
+            read_only["sprinkler_read_calls"]
+        )
+        missing_read["sprinkler_read_calls"].pop("get_sprinkler_summary")
+        with self.assertRaisesRegex(AssertionError, "every read"):
+            _verification_report(missing_read, {}, {})
+
+        missing_inventory = dict(read_only)
+        missing_inventory["sprinkler_inventory"] = None
+        with self.assertRaisesRegex(AssertionError, "inventory evidence is missing"):
+            _verification_report(missing_inventory, {}, {})
 
     def test_verifier_uses_only_canonical_lan_services(self) -> None:
         self.assertTrue(set(LAN_PROBE_SERVICES).issubset(SERVICE_PORTS))

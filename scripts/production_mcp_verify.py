@@ -565,6 +565,49 @@ async def _session(scope: str, *, diagnostics_allowed: bool) -> dict[str, Any]:
                 }
 
 
+def _verification_report(
+    read_only: dict[str, Any],
+    least_privileged: dict[str, Any],
+    legacy: dict[str, Any],
+) -> dict[str, Any]:
+    sprinkler_calls = read_only.get("sprinkler_read_calls")
+    if not isinstance(sprinkler_calls, dict):
+        raise AssertionError("read-only sprinkler acceptance results are missing")
+    if set(sprinkler_calls) != set(SPRINKLER_READ_REQUESTS) or not all(
+        value is True for value in sprinkler_calls.values()
+    ):
+        raise AssertionError("read-only sprinkler acceptance did not execute every read")
+    inventory = read_only.get("sprinkler_inventory")
+    if not isinstance(inventory, dict):
+        raise AssertionError("read-only sprinkler inventory evidence is missing")
+    configured = inventory.get("configured_zone_count")
+    integration = inventory.get("integration_zone_count")
+    zone_ids = inventory.get("normalized_zone_ids")
+    if (
+        not isinstance(configured, int)
+        or isinstance(configured, bool)
+        or configured < 1
+        or integration != configured
+        or not isinstance(zone_ids, list)
+        or len(zone_ids) != configured
+    ):
+        raise AssertionError("read-only sprinkler inventory evidence is inconsistent")
+    if set(read_only.get("sprinkler_command_schemas_inspected") or ()) != (
+        SPRINKLER_COMMAND_TOOLS
+    ):
+        raise AssertionError("sprinkler command schema inspection is incomplete")
+    return {
+        "public_authentication": "verified",
+        "insufficient_scope_rejected": all(
+            not allowed for allowed in read_only["diagnostic_calls"].values()
+        ),
+        "read_only_scope": read_only,
+        "least_privileged_scope": least_privileged,
+        "legacy_scope": legacy,
+        "sanitization_scan": "passed",
+    }
+
+
 async def main() -> None:
     endpoint = f"{_verification_base_url()}/mcp"
     await _raw_auth_checks(endpoint)
@@ -575,15 +618,7 @@ async def main() -> None:
     legacy = await _session("mcp:read mcp:write", diagnostics_allowed=True)
     print(
         json.dumps(
-            {
-                "public_authentication": "verified",
-                "insufficient_scope_rejected": all(
-                    not allowed for allowed in read_only["diagnostic_calls"].values()
-                ),
-                "least_privileged_scope": least_privileged,
-                "legacy_scope": legacy,
-                "sanitization_scan": "passed",
-            },
+            _verification_report(read_only, least_privileged, legacy),
             indent=2,
             sort_keys=True,
         )
