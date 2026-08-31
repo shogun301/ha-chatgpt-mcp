@@ -384,12 +384,12 @@ class DeploymentScriptSecurityTests(unittest.TestCase):
             if re.match(r"^\s*(?:sudo\s+)?install\b", line):
                 cls.install_commands.append(shlex.split(line.strip(), posix=True))
 
-    def test_release_is_pinned_to_2_7_6(self) -> None:
+    def test_release_is_pinned_to_2_7_7(self) -> None:
         self.assertRegex(
             self.text,
-            r"(?m)^\s*\$releaseVersion\s*=\s*['\"]2\.7\.6['\"]\s*$",
+            r"(?m)^\s*\$releaseVersion\s*=\s*['\"]2\.7\.7['\"]\s*$",
         )
-        self.assertRegex(self.text, r"(?m)^\s*release_version=['\"]2\.7\.6['\"]\s*$")
+        self.assertRegex(self.text, r"(?m)^\s*release_version=['\"]2\.7\.7['\"]\s*$")
 
     def test_tests_run_before_main_container_recreation(self) -> None:
         main = self.text[
@@ -460,7 +460,7 @@ class DeploymentScriptSecurityTests(unittest.TestCase):
             self.text.index("stage='validating_runtime_hardening'")
         ]
         self.assertIn("for attempt in $(seq 1 180)", fixed)
-        self.assertIn('p.get("service_version") == "2.7.6"', fixed)
+        self.assertIn('p.get("service_version") == "2.7.7"', fixed)
         self.assertIn('[ "$fixed_routes_ready" -eq 1 ]', fixed)
 
     def test_retention_check_parses_full_iso_date_suffix(self) -> None:

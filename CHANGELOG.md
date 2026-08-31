@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.7.7 - 2026-08-30
+
+- Acknowledge the reviewed Home Assistant Hubitat service-registry expansion without exposing new writes.
+- Keep lock-code reads/writes, arbitrary commands, alarm/security mode, delay settings, hub identifiers, and free-text hub mode fail-closed pending separately reviewed typed adapters.
+- Mark the reviewed Hubitat exclusions in `list_services` so clients do not mistake schema discovery for authorization.
+
 ## 2.7.6 - 2026-08-30
 
 - Add coordinator-owned logical sprinkler runs with ordered queue state and bounded pause, resume, and stop services for scheduled and dashboard sequences.

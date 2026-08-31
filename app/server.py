@@ -103,7 +103,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 LOGGER = logging.getLogger("ha_chatgpt_mcp")
-SERVER_VERSION = "2.7.6"
+SERVER_VERSION = "2.7.7"
 audit = AuditLog(config.AUDIT_LOG_PATH)
 oauth = OAuthServer(
     OAuthStore(config.DATABASE_PATH),
@@ -230,6 +230,22 @@ ALLOWED_SERVICES: dict[str, set[str]] = {
     "water_heater": {"turn_on", "turn_off", "set_temperature", "set_operation_mode"},
     "vacuum": {"start", "pause", "stop", "return_to_base", "locate", "clean_spot"},
 }
+
+HUBITAT_FAIL_CLOSED_SERVICES = {
+    "clear_code",
+    "get_codes",
+    "send_command",
+    "set_code",
+    "set_code_length",
+    "set_entry_delay",
+    "set_exit_delay",
+    "set_hsm",
+    "set_hub_mode",
+}
+HUBITAT_EXCLUSION_REASON = (
+    "security, arbitrary-command, identifier-bearing, or automation-triggering "
+    "Hubitat operations require a separately reviewed typed adapter"
+)
 
 TURNABLE_DOMAINS = {
     "fan",
@@ -2256,6 +2272,12 @@ async def list_services(domain: str | None = None) -> dict[str, Any]:
             continue
         services = []
         for name, detail in (item.get("services") or {}).items():
+            fail_closed_reason = None
+            if (
+                item.get("domain") == "hubitat"
+                and name in HUBITAT_FAIL_CLOSED_SERVICES
+            ):
+                fail_closed_reason = HUBITAT_EXCLUSION_REASON
             services.append(
                 {
                     "service": name,
@@ -2264,6 +2286,7 @@ async def list_services(domain: str | None = None) -> dict[str, Any]:
                     "fields": detail.get("fields", {}),
                     "generic_call_allowed": name
                     in ALLOWED_SERVICES.get(item.get("domain"), set()),
+                    "fail_closed_reason": fail_closed_reason,
                 }
             )
         items.append({"domain": item.get("domain"), "services": services})

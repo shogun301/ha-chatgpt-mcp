@@ -49,7 +49,10 @@ from app.ha_client import (
 )
 from app.oauth import OAuthServer
 from app.server import (
+    ALLOWED_SERVICES,
     DEFAULT_TEMPERATURE_PRESETS,
+    HUBITAT_EXCLUSION_REASON,
+    HUBITAT_FAIL_CLOSED_SERVICES,
     SERVER_VERSION,
     ThermostatScheduleEntry,
     _build_solaredge_bridge_snapshot,
@@ -91,7 +94,7 @@ class CloudToolSurfaceTests(unittest.TestCase):
     def test_server_advertises_expanded_typed_surface(self) -> None:
         tools = asyncio.run(mcp.list_tools())
         names = {tool.name for tool in tools}
-        self.assertEqual(mcp.version, "2.7.6")
+        self.assertEqual(mcp.version, "2.7.7")
         self.assertEqual(len(names), 107)
         self.assertTrue(
             {
@@ -156,6 +159,24 @@ class CloudToolSurfaceTests(unittest.TestCase):
                 "set_time_value",
             }.issubset(names)
         )
+
+    def test_hubitat_service_drift_remains_explicitly_fail_closed(self) -> None:
+        self.assertEqual(
+            HUBITAT_FAIL_CLOSED_SERVICES,
+            {
+                "clear_code",
+                "get_codes",
+                "send_command",
+                "set_code",
+                "set_code_length",
+                "set_entry_delay",
+                "set_exit_delay",
+                "set_hsm",
+                "set_hub_mode",
+            },
+        )
+        self.assertNotIn("hubitat", ALLOWED_SERVICES)
+        self.assertIn("typed adapter", HUBITAT_EXCLUSION_REASON)
 
     def test_home_overview_exposes_service_version(self) -> None:
         with (

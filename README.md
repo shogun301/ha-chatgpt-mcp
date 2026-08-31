@@ -43,7 +43,7 @@ unrestricted service proxy.
 - **OAuth-native remote access:** authorization code flow with S256 PKCE,
   dynamic client registration, scoped access tokens, and MCP resource metadata.
 
-Version **2.7.6** currently advertises **107 tools**. See
+Version **2.7.7** currently advertises **107 tools**. See
 [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## Architecture
@@ -260,6 +260,12 @@ changes across restarts. The monitor is deliberately observational: it never
 calls a service and never turns an unreviewed Home Assistant service into a new
 MCP write tool. New functionality should be reviewed, implemented as typed
 tools, tested, and released through Git.
+
+The reviewed Hubitat integration services remain fail-closed. Lock-code
+operations, arbitrary commands, alarm/security mode, delay configuration,
+token-derived hub identifiers, and free-text hub mode are not exposed through
+`call_service`; `list_services` reports the exclusion reason without returning
+credentials or identifiers.
 
 ## Optional host and LAN diagnostics
 
