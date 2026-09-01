@@ -261,6 +261,7 @@ def verify_registry_contract() -> str:
         "tool_schema_sha256",
         "tool_output_schema_sha256",
         "tool_annotations_sha256",
+        "tool_metadata_sha256",
     ):
         if not re.fullmatch(r"[0-9a-f]{64}", str(payload.get(field, ""))):
             raise AssertionError(f"registry contract {field} is invalid")

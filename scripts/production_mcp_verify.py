@@ -38,9 +38,9 @@ DIAGNOSTIC_TOOLS = (
     "probe_lan_node",
 )
 LAN_PROBE_SERVICES = ("dns", "router_ssh")
-EXPECTED_VERSION = "2.7.7"
-EXPECTED_TOOL_COUNT = 107
-CONTRACT_PATH = Path("/app/tests/fixtures/server-contract-2.7.7.json")
+EXPECTED_VERSION = "2.7.8"
+EXPECTED_TOOL_COUNT = 110
+CONTRACT_PATH = Path("/app/tests/fixtures/server-contract-2.7.8.json")
 NEW_CAPABILITY_TOOLS = {
     "get_capability_sync_status",
     "get_calendar_events",
@@ -60,6 +60,9 @@ NEW_CAPABILITY_TOOLS = {
     "get_sprinkler_controller_diagnostics",
     "run_sprinkler_zone_exact",
     "run_sprinkler_sequence_exact",
+    "pause_sprinklers",
+    "resume_sprinklers",
+    "skip_sprinkler_zone",
 }
 DIAGNOSTIC_REQUESTS: dict[str, dict[str, Any]] = {
     "get_host_runtime_health": {},
@@ -94,7 +97,15 @@ SPRINKLER_COMMAND_TOOLS = {
     "run_sprinkler_sequence",
     "run_sprinkler_zone_exact",
     "run_sprinkler_sequence_exact",
+    "pause_sprinklers",
+    "resume_sprinklers",
+    "skip_sprinkler_zone",
     "stop_sprinklers",
+}
+SPRINKLER_CONFIRMATION_TOOLS = {
+    "pause_sprinklers",
+    "resume_sprinklers",
+    "skip_sprinkler_zone",
 }
 STATE_EVIDENCE = {
     "commanded",
@@ -389,6 +400,22 @@ def _validate_sprinkler_result(name: str, payload: dict[str, Any]) -> None:
         unsupported = [item for item in capabilities if item.get("supported") is False]
         if not unsupported or any(not item.get("limitation") for item in unsupported):
             raise AssertionError("unsupported sprinkler capabilities lack limitations")
+    elif name == "get_sprinkler_command_status":
+        logical = payload.get("logical_run")
+        if not isinstance(logical, dict):
+            raise AssertionError("logical sprinkler run status is missing")
+        for field in ("can_pause", "can_resume", "can_skip", "can_stop"):
+            if not isinstance(logical.get(field), bool):
+                raise AssertionError(f"logical sprinkler status lacks boolean {field}")
+        if logical.get("physical_state_verified") is not False:
+            raise AssertionError("logical sprinkler status claims physical verification")
+        if logical.get("can_skip") is True and not (
+            logical.get("state") == "running"
+            and logical.get("source") == "dashboard_manual"
+            and isinstance(logical.get("remaining_queued_zones"), list)
+            and bool(logical["remaining_queued_zones"])
+        ):
+            raise AssertionError("logical sprinkler skip eligibility is not fail-closed")
     elif name == "list_sprinkler_schedules":
         _assert_unsupported(payload.get("mutations"), "schedule mutations")
     elif name == "get_sprinkler_weather_and_decisions":
@@ -416,10 +443,18 @@ def _assert_registry_contract(tools: list[Any]) -> None:
         name: tool.annotations.model_dump(mode="json") if tool.annotations else None
         for name, tool in by_name.items()
     }
+    metadata = {
+        name: {
+            "title": tool.title,
+            "description": tool.description,
+        }
+        for name, tool in by_name.items()
+    }
     expected = {
         "tool_schema_sha256": _canonical_hash(input_schemas),
         "tool_output_schema_sha256": _canonical_hash(output_schemas),
         "tool_annotations_sha256": _canonical_hash(annotations),
+        "tool_metadata_sha256": _canonical_hash(metadata),
     }
     for key, value in expected.items():
         if contract.get(key) != value:
@@ -492,6 +527,23 @@ async def _session(scope: str, *, diagnostics_allowed: bool) -> dict[str, Any]:
                     )
                 if not SPRINKLER_COMMAND_TOOLS.issubset(tool_names):
                     raise AssertionError("sprinkler command registry is incomplete")
+                by_name = {item.name: item for item in tools.tools}
+                for name in SPRINKLER_CONFIRMATION_TOOLS:
+                    tool = by_name[name]
+                    properties = tool.input_schema.get("properties", {})
+                    if set(properties) != {"confirmed"}:
+                        raise AssertionError(f"{name} exposes unexpected command inputs")
+                    confirmed = properties["confirmed"]
+                    if confirmed.get("type") != "boolean" or confirmed.get("default") is not False:
+                        raise AssertionError(f"{name} confirmation schema is unsafe")
+                    annotations = tool.annotations
+                    if (
+                        annotations is None
+                        or annotations.destructive_hint is not True
+                        or annotations.idempotent_hint is not False
+                        or annotations.open_world_hint is not False
+                    ):
+                        raise AssertionError(f"{name} safety annotations are unsafe")
                 _assert_registry_contract(tools.tools)
 
                 sync_result = await session.call_tool(

@@ -78,6 +78,7 @@ from .sprinkler import (
     SprinklerDiagnostics,
     SprinklerHistory,
     SprinklerHistoryInterval,
+    SprinklerLogicalRunStatus,
     SprinklerRefreshResult,
     SprinklerScheduleList,
     SprinklerSummary,
@@ -103,7 +104,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 LOGGER = logging.getLogger("ha_chatgpt_mcp")
-SERVER_VERSION = "2.7.7"
+SERVER_VERSION = "2.7.8"
 audit = AuditLog(config.AUDIT_LOG_PATH)
 oauth = OAuthServer(
     OAuthStore(config.DATABASE_PATH),
@@ -555,8 +556,9 @@ mcp = RedactingMCPServer(
         "thermostat schedule and shared-preset tools for schedule work: schedule and shared-preset "
         "updates do not change current setpoints, while apply_temperature_preset and "
         "resume_thermostat_schedule do. High-impact buttons, locks, garage/gate/door movement, "
-        "sirens, security controls, and destructive removals require explicit current-turn "
-        "confirmation. Use call_service only when no focused tool fits; never use it for security "
+        "sirens, security controls, sprinkler starts, pause, resume, skip, and destructive "
+        "removals require explicit current-turn confirmation. Use call_service only when no "
+        "focused tool fits; never use it for security "
         "controls, administration, shell commands, shutdown, credentials, or broad or ambiguous "
         "changes. For home-LAN discovery or reachability, use the fixed read-only LAN tools; "
         "they accept only node IDs inside the configured home subnet and a closed service list. "
@@ -575,7 +577,15 @@ def _require_write() -> None:
 def _require_sprinkler_write(operation: str) -> None:
     """Authorize only the deliberately exposed controller-scoped operations."""
     _require_write()
-    if operation not in {"run_zone", "run_sequence", "stop", "refresh"}:
+    if operation not in {
+        "run_zone",
+        "run_sequence",
+        "pause",
+        "resume",
+        "skip",
+        "stop",
+        "refresh",
+    }:
         raise PermissionError("This sprinkler operation is not authorized")
 
 
@@ -4732,6 +4742,14 @@ async def get_sprinkler_capabilities() -> SprinklerCapabilities:
             upstream_source="Wyze irrigation runningschedule STOP",
         ),
         CapabilityItem(
+            capability="pause_resume_logical_run",
+            supported=True,
+            operations=["command"],
+            evidence="commanded",
+            semantics="Pause retains the exact current-zone remainder and queued zones; resume starts that retained remainder and continues the queue. Both require explicit current-turn confirmation.",
+            upstream_source="Home Assistant Wyze logical-run coordinator",
+        ),
+        CapabilityItem(
             capability="native_schedule_definitions",
             supported=True,
             operations=["read"],
@@ -4762,11 +4780,19 @@ async def get_sprinkler_capabilities() -> SprinklerCapabilities:
             limitation="Quick Run is verified; native program-run request semantics are not.",
         ),
         CapabilityItem(
-            capability="manual_skip_command",
+            capability="active_sequence_zone_skip",
+            supported=True,
+            operations=["command"],
+            evidence="commanded",
+            semantics="Stop the current zone and advance only a running dashboard-owned multi-zone Quick Run to its next queued zone after explicit current-turn confirmation.",
+            upstream_source="Home Assistant Wyze logical-run coordinator",
+        ),
+        CapabilityItem(
+            capability="native_schedule_manual_skip",
             supported=False,
-            semantics="No verified request exists to mark a native scheduled run manually skipped.",
+            semantics="Native fixed or smart scheduled-program runs cannot be manually skipped through a verified API request.",
             upstream_source="Wyze private irrigation API audit",
-            limitation="Observed skip fields report outcomes only; they do not define a safe command contract.",
+            limitation="The typed sequence skip applies only to Home Assistant-owned dashboard Quick Runs, not native scheduled programs.",
         ),
         CapabilityItem(
             capability="upcoming_runs",
@@ -4860,6 +4886,56 @@ async def get_sprinkler_command_status() -> SprinklerCommandStatus:
         controller = summary.controller_state
     else:
         controller = _controller_from_snapshot(snapshot)
+    logical_raw = snapshot.get("logical_run")
+    logical = logical_raw if isinstance(logical_raw, dict) else {}
+
+    def logical_zone(value: Any) -> dict[str, Any] | None:
+        if not isinstance(value, dict):
+            return None
+        number = _zone_number(value)
+        if number is None:
+            return None
+        native_id = _first(value, "native_zone_id", "zone_id", "id")
+        if native_id == normalized_zone_id(number):
+            native_id = None
+        return {
+            "zone_id": normalized_zone_id(number),
+            "native_zone_id": str(native_id) if native_id is not None else None,
+            "duration_seconds": _as_int(
+                _first(value, "duration_seconds", "duration", "requested_duration_seconds")
+            ),
+        }
+
+    state = str(logical.get("state") or "unavailable").lower()
+    source = str(logical.get("source")).lower() if logical.get("source") else None
+    current_zone = logical_zone(logical.get("current_zone"))
+    raw_remaining = logical.get("remaining_queued_zones")
+    if not isinstance(raw_remaining, list):
+        raw_remaining = []
+    remaining_zones = [
+        item
+        for item in (logical_zone(value) for value in raw_remaining)
+        if item is not None
+    ]
+    remaining_seconds = _as_int(logical.get("current_zone_remaining_seconds"))
+    if remaining_seconds is not None and remaining_seconds < 0:
+        remaining_seconds = None
+    logical_status = SprinklerLogicalRunStatus(
+        state=state,
+        source=source,
+        can_pause=logical.get("can_pause") is True and state == "running",
+        can_resume=logical.get("can_resume") is True and state == "paused",
+        can_skip=(
+            logical.get("can_skip") is True
+            and state == "running"
+            and source == "dashboard_manual"
+            and bool(remaining_zones)
+        ),
+        can_stop=logical.get("can_stop") is True and state in {"running", "paused"},
+        current_zone=current_zone,
+        remaining_queued_zones=remaining_zones,
+        current_zone_remaining_seconds=remaining_seconds,
+    )
     pending_raw = snapshot.get("command_pending")
     command_status_raw = snapshot.get("command_status")
     integration_status = (
@@ -4881,6 +4957,9 @@ async def get_sprinkler_command_status() -> SprinklerCommandStatus:
             "run_sprinkler_sequence",
             "run_sprinkler_zone_exact",
             "run_sprinkler_sequence_exact",
+            "pause_sprinklers",
+            "resume_sprinklers",
+            "skip_sprinkler_zone",
             "stop_sprinklers",
         }
     )
@@ -4938,6 +5017,7 @@ async def get_sprinkler_command_status() -> SprinklerCommandStatus:
         integration_command_status=integration_status,
         last_mcp_command=last_command,
         controller_state=controller,
+        logical_run=logical_status,
         note="Command records prove submission only; controller state remains separate and neither proves physical valve position or flow.",
     )
 
@@ -5541,6 +5621,69 @@ async def stop_sprinklers() -> SprinklerCommandResult:
         status="provider_accepted",
         command_id=command_id,
         operation="stop",
+        zones=[],
+    )
+
+
+@mcp.tool(title="Pause sprinkler logical run", annotations=DESTRUCTIVE_WRITE)
+async def pause_sprinklers(confirmed: bool = False) -> SprinklerCommandResult:
+    """Pause the active logical run while retaining its remainder and queued zones."""
+    _require_sprinkler_write("pause")
+    _require_confirmed(confirmed, "Pausing the active sprinkler run")
+    device_id = await _sprinkler_device_id()
+    command_id = str(uuid.uuid4())
+    await ha.call_service(
+        "wyzeapi",
+        "pause_sprinkler",
+        {"device_id": [device_id], "command_id": command_id, "source": "mcp"},
+    )
+    _audit_tool("pause_sprinklers", command_id=command_id, operation="pause")
+    return SprinklerCommandResult(
+        status="provider_accepted",
+        command_id=command_id,
+        operation="pause",
+        zones=[],
+    )
+
+
+@mcp.tool(title="Resume sprinkler logical run", annotations=DESTRUCTIVE_WRITE)
+async def resume_sprinklers(confirmed: bool = False) -> SprinklerCommandResult:
+    """Resume the paused zone remainder, then continue its queued zones."""
+    _require_sprinkler_write("resume")
+    _require_confirmed(confirmed, "Resuming the paused sprinkler run")
+    device_id = await _sprinkler_device_id()
+    command_id = str(uuid.uuid4())
+    await ha.call_service(
+        "wyzeapi",
+        "resume_sprinkler",
+        {"device_id": [device_id], "command_id": command_id, "source": "mcp"},
+    )
+    _audit_tool("resume_sprinklers", command_id=command_id, operation="resume")
+    return SprinklerCommandResult(
+        status="provider_accepted",
+        command_id=command_id,
+        operation="resume",
+        zones=[],
+    )
+
+
+@mcp.tool(title="Skip current sprinkler zone", annotations=DESTRUCTIVE_WRITE)
+async def skip_sprinkler_zone(confirmed: bool = False) -> SprinklerCommandResult:
+    """Advance a running dashboard-owned multi-zone Quick Run to its next zone."""
+    _require_sprinkler_write("skip")
+    _require_confirmed(confirmed, "Skipping the current sprinkler zone")
+    device_id = await _sprinkler_device_id()
+    command_id = str(uuid.uuid4())
+    await ha.call_service(
+        "wyzeapi",
+        "skip_sprinkler_zone",
+        {"device_id": [device_id], "command_id": command_id, "source": "mcp"},
+    )
+    _audit_tool("skip_sprinkler_zone", command_id=command_id, operation="skip")
+    return SprinklerCommandResult(
+        status="provider_accepted",
+        command_id=command_id,
+        operation="skip",
         zones=[],
     )
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.7.8 - 2026-09-01
+
+- Add typed, destructive, non-idempotent `pause_sprinklers`, `resume_sprinklers`, and `skip_sprinkler_zone` tools, each gated by explicit current-turn confirmation and restricted to the configured controller.
+- Expose normalized logical-run status so clients can route only eligible operations; current-zone skip remains limited to an active dashboard-owned multi-zone Quick Run with another queued zone.
+- Preserve native scheduled-program skip as unsupported, keep generic and automation service routing fail-closed, and never exercise physical sprinkler commands during release acceptance.
+- Reconcile the immutable MCP release with the reviewed Wyze overlay 0.1.45 countdown, eleven-service verifier, and manual-sequence skip behavior.
+- Extend the registry fixture to integrity-check client-visible tool titles and descriptions in addition to names, schemas, and safety annotations.
+
 ## 2.7.7 - 2026-08-30
 
 - Acknowledge the reviewed Home Assistant Hubitat service-registry expansion without exposing new writes.

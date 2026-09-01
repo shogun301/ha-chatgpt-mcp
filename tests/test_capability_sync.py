@@ -45,6 +45,36 @@ class CapabilityNormalizationTests(unittest.TestCase):
 
 
 class CapabilitySyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_skip_service_drift_is_acknowledged_only_by_new_release(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state_path = Path(temporary) / "capability-sync.json"
+            ha = AsyncMock()
+            prior = services(("wyzeapi", "stop_sprinkler", {}))
+            current = services(
+                ("wyzeapi", "stop_sprinkler", {}),
+                (
+                    "wyzeapi",
+                    "skip_sprinkler_zone",
+                    {
+                        "command_id": {"required": False},
+                        "source": {"required": False},
+                    },
+                ),
+            )
+            ha.services.return_value = prior
+            old_release = CapabilitySync(state_path, "2.7.7", interval_seconds=60)
+            self.assertEqual((await old_release.refresh(ha))["status"], "in_sync")
+
+            ha.services.return_value = current
+            drift = await old_release.refresh(ha)
+            self.assertEqual(drift["status"], "drift_detected")
+            self.assertEqual(drift["drift"]["added"], ["wyzeapi.skip_sprinkler_zone"])
+
+            new_release = CapabilitySync(state_path, "2.7.8", interval_seconds=60)
+            acknowledged = await new_release.refresh(ha)
+            self.assertEqual(acknowledged["status"], "in_sync")
+            self.assertFalse(any(acknowledged["drift"].values()))
+
     async def test_drift_persists_across_restart_until_release_changes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state_path = Path(temporary) / "capability-sync.json"

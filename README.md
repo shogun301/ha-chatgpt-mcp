@@ -8,7 +8,7 @@ An OAuth-protected
 [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server for
 securely connecting ChatGPT, Codex, and other MCP clients to Home Assistant.
 
-The project exposes 107 typed tools for discovery, dashboards, schedules,
+The project exposes 110 typed tools for discovery, dashboards, schedules,
 climate, energy, media, cleaning, irrigation, automations, diagnostics, and
 carefully bounded device control. It keeps Home Assistant's API private and
 deliberately avoids becoming a generic shell, log reader, network scanner, or
@@ -30,7 +30,8 @@ unrestricted service proxy.
 - **Sprinkler support:** evidence-labelled controller and command status,
   advanced zone configuration, modeled moisture, rolling per-zone history,
   native schedule/upcoming-run reads, weather/skip decisions, exact-second zone
-  or sequence starts, and idempotent stop operations.
+  or sequence starts, confirmed logical-run pause/resume/current-zone skip,
+  and idempotent stop operations.
 - **Energy and SolarEdge:** production, module comparison, power flow, energy
   breakdowns, storage summaries, telemetry, alerts, and an optional Home
   Assistant bridge integration.
@@ -43,7 +44,7 @@ unrestricted service proxy.
 - **OAuth-native remote access:** authorization code flow with S256 PKCE,
   dynamic client registration, scoped access tokens, and MCP resource metadata.
 
-Version **2.7.7** currently advertises **107 tools**. See
+Version **2.7.8** currently advertises **110 tools**. See
 [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## Architecture
@@ -77,7 +78,7 @@ over a private network.
 | Dashboards and statistics | List/read/create/update dashboards; long-term statistics                  | Read/write                               |
 | Climate and schedules     | Targets, modes, fan modes, presets, weekly schedules, time helpers        | Read/write                               |
 | Media and cleaning        | Browse/play media, TTS, Cast dashboards, vacuum rooms and fan speed       | Read/write                               |
-| Irrigation                | Status, zones, Gantt history, schedules, weather, diagnostics, exact runs | Read/write                               |
+| Irrigation                | Status, zones, history, schedules, exact runs, pause/resume/skip/stop | Read/write                               |
 | Organization              | Calendars, to-do lists, automations, notifications                        | Read/write                               |
 | Energy                    | SolarEdge summaries, power flow, storage, telemetry, and alerts           | Read; optional authorization write       |
 | Operations                | Backups, capability drift, fixed routes, host/runtime, outages, LAN nodes | Read; backup creation is confirmed write |
@@ -189,6 +190,15 @@ stops at the requested second, requires controller-reported idle before
 advancing, and retains the current remainder and queue while paused. See the
 [capability matrix](docs/wyze-sprinkler-capability-matrix.md) for confirmed
 semantics and upstream limits.
+
+MCP clients should read `get_sprinkler_command_status.logical_run` before a
+pause, resume, or skip when eligibility is not already known. The dedicated
+tools accept only `confirmed`; each requires explicit current-turn confirmation,
+is non-idempotent, and must not be retried automatically. Read status once after
+submission. `skip_sprinkler_zone` stops the current zone and advances only an
+active dashboard-owned multi-zone Quick Run with a queued next zone. It does not
+skip a native scheduled program and is excluded from generic service routing and
+automation construction.
 
 ### Required secret files
 

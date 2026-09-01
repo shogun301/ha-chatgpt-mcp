@@ -94,8 +94,8 @@ class CloudToolSurfaceTests(unittest.TestCase):
     def test_server_advertises_expanded_typed_surface(self) -> None:
         tools = asyncio.run(mcp.list_tools())
         names = {tool.name for tool in tools}
-        self.assertEqual(mcp.version, "2.7.7")
-        self.assertEqual(len(names), 107)
+        self.assertEqual(mcp.version, "2.7.8")
+        self.assertEqual(len(names), 110)
         self.assertTrue(
             {
                 "get_home_overview",
@@ -153,6 +153,9 @@ class CloudToolSurfaceTests(unittest.TestCase):
                 "get_sprinkler_controller_diagnostics",
                 "run_sprinkler_zone_exact",
                 "run_sprinkler_sequence_exact",
+                "pause_sprinklers",
+                "resume_sprinklers",
+                "skip_sprinkler_zone",
                 "get_calendar_events",
                 "create_calendar_event",
                 "get_schedule",
@@ -753,6 +756,11 @@ class ConfigurationSafetyTests(unittest.TestCase):
                 "action": "wyzeapi.pause_sprinkler",
                 "target": {"device_id": device_id},
                 "data": {"zones": []},
+            },
+            {
+                "action": "wyzeapi.skip_sprinkler_zone",
+                "target": {"device_id": device_id},
+                "data": {"source": "scheduled"},
             },
             {
                 "action": "button.press",

@@ -230,11 +230,25 @@ class CommandObservation(SprinklerModel):
     physical_state_verified: bool = False
 
 
+class SprinklerLogicalRunStatus(SprinklerModel):
+    state: str
+    source: str | None = None
+    can_pause: bool = False
+    can_resume: bool = False
+    can_skip: bool = False
+    can_stop: bool = False
+    current_zone: SprinklerCommandZone | None = None
+    remaining_queued_zones: list[SprinklerCommandZone] = Field(default_factory=list)
+    current_zone_remaining_seconds: int | None = Field(default=None, ge=0)
+    physical_state_verified: bool = False
+
+
 class SprinklerCommandStatus(SprinklerModel):
     pending_command: CommandObservation | None = None
     integration_command_status: CommandObservation | None = None
     last_mcp_command: CommandObservation | None = None
     controller_state: ControllerState
+    logical_run: SprinklerLogicalRunStatus
     note: str
 
 

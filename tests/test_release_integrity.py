@@ -19,7 +19,7 @@ class ReleaseIntegrityTests(unittest.TestCase):
         self.assertIn("scripts", sources)
 
     def test_project_and_release_versions_match(self) -> None:
-        self.assertEqual(release_integrity.verify_versions(), "2.7.7")
+        self.assertEqual(release_integrity.verify_versions(), "2.7.8")
 
     def test_manifest_references_exist(self) -> None:
         references = release_integrity.verify_manifests()
@@ -43,7 +43,7 @@ class ReleaseIntegrityTests(unittest.TestCase):
     def test_registry_contract_has_input_output_and_annotation_hashes(self) -> None:
         self.assertEqual(
             release_integrity.verify_registry_contract(),
-            "tests/fixtures/server-contract-2.7.7.json",
+            "tests/fixtures/server-contract-2.7.8.json",
         )
 
     def test_untracked_copied_directory_fails_closed(self) -> None:

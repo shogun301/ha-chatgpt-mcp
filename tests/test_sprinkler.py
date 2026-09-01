@@ -53,12 +53,15 @@ from app.server import (
     get_sprinkler_weather_and_decisions,
     list_sprinkler_schedules,
     mcp,
+    pause_sprinklers,
     press_button,
     run_sprinkler_sequence,
     run_sprinkler_sequence_exact,
     run_sprinkler_zone,
     run_sprinkler_zone_exact,
+    resume_sprinklers,
     set_number_value,
+    skip_sprinkler_zone,
     stop_sprinklers,
 )
 from app.sprinkler import ConfigurationValue, SprinklerConfiguration
@@ -109,6 +112,9 @@ class SprinklerContractTests(unittest.TestCase):
             "run_sprinkler_sequence",
             "run_sprinkler_zone_exact",
             "run_sprinkler_sequence_exact",
+            "pause_sprinklers",
+            "resume_sprinklers",
+            "skip_sprinkler_zone",
             "stop_sprinklers",
         }
         self.assertTrue(expected.issubset(tools))
@@ -153,6 +159,12 @@ class SprinklerContractTests(unittest.TestCase):
         self.assertEqual(
             exact_input["properties"]["duration_seconds"]["minimum"], 1
         )
+        for name in ("pause_sprinklers", "resume_sprinklers", "skip_sprinkler_zone"):
+            self.assertEqual(set(tools[name].input_schema["properties"]), {"confirmed"})
+            self.assertFalse(tools[name].input_schema["properties"]["confirmed"]["default"])
+            self.assertTrue(tools[name].annotations.destructive_hint)
+            self.assertFalse(tools[name].annotations.idempotent_hint)
+            self.assertFalse(tools[name].annotations.open_world_hint)
 
     def test_exact_zone_command_constructs_native_integer_seconds(self) -> None:
         token = claims_context.set({"scope": "mcp:read mcp:write"})
@@ -274,6 +286,58 @@ class SprinklerContractTests(unittest.TestCase):
         self.assertEqual(stop_call.args[2]["command_id"], stop_result.command_id)
         self.assertEqual(stop_call.args[2]["device_id"], ["device-registry-id"])
 
+    def test_pause_resume_and_skip_require_confirmation_and_use_exact_services(self) -> None:
+        token = claims_context.set({"scope": "mcp:read mcp:write"})
+        try:
+            with (
+                patch(
+                    "app.server._sprinkler_device_id",
+                    new=AsyncMock(return_value="device-registry-id"),
+                ),
+                patch(
+                    "app.server.ha.call_service", new=AsyncMock(return_value=[])
+                ) as service,
+            ):
+                for command in (
+                    pause_sprinklers,
+                    resume_sprinklers,
+                    skip_sprinkler_zone,
+                ):
+                    with self.subTest(command=command.__name__), self.assertRaises(
+                        PermissionError
+                    ):
+                        asyncio.run(command(False))
+                self.assertEqual(service.await_count, 0)
+
+                results = [
+                    asyncio.run(pause_sprinklers(True)),
+                    asyncio.run(resume_sprinklers(True)),
+                    asyncio.run(skip_sprinkler_zone(True)),
+                ]
+        finally:
+            claims_context.reset(token)
+
+        self.assertEqual(
+            [call.args[:2] for call in service.await_args_list],
+            [
+                ("wyzeapi", "pause_sprinkler"),
+                ("wyzeapi", "resume_sprinkler"),
+                ("wyzeapi", "skip_sprinkler_zone"),
+            ],
+        )
+        for call, result, operation in zip(
+            service.await_args_list,
+            results,
+            ("pause", "resume", "skip"),
+            strict=True,
+        ):
+            self.assertEqual(call.args[2]["device_id"], ["device-registry-id"])
+            self.assertEqual(call.args[2]["source"], "mcp")
+            self.assertEqual(call.args[2]["command_id"], result.command_id)
+            self.assertEqual(result.operation, operation)
+            self.assertEqual(result.zones, [])
+            self.assertFalse(result.physical_state_verified)
+
     def test_history_unions_recorder_dedupes_and_includes_overlap(self) -> None:
         now = datetime.now(UTC)
         provider_run = {
@@ -382,6 +446,27 @@ class SprinklerContractTests(unittest.TestCase):
                                 "evidence_type": "controller-reported",
                             },
                             "command_pending": False,
+                            "logical_run": {
+                                "state": "running",
+                                "source": "dashboard_manual",
+                                "can_pause": True,
+                                "can_resume": False,
+                                "can_skip": True,
+                                "can_stop": True,
+                                "current_zone": {
+                                    "zone_number": 2,
+                                    "zone_id": "native-b",
+                                    "duration_seconds": 121,
+                                },
+                                "remaining_queued_zones": [
+                                    {
+                                        "zone_number": 1,
+                                        "zone_id": "native-a",
+                                        "duration_seconds": 60,
+                                    }
+                                ],
+                                "current_zone_remaining_seconds": 75,
+                            },
                         }
                     }
                 ),
@@ -421,6 +506,45 @@ class SprinklerContractTests(unittest.TestCase):
             [121, 60],
         )
         self.assertEqual(status.last_mcp_command.zones[0].native_zone_id, "native-b")
+        self.assertEqual(status.logical_run.state, "running")
+        self.assertEqual(status.logical_run.source, "dashboard_manual")
+        self.assertTrue(status.logical_run.can_pause)
+        self.assertTrue(status.logical_run.can_skip)
+        self.assertTrue(status.logical_run.can_stop)
+        self.assertFalse(status.logical_run.can_resume)
+        self.assertEqual(status.logical_run.current_zone.zone_id, "zone-2")
+        self.assertEqual(status.logical_run.current_zone.native_zone_id, "native-b")
+        self.assertEqual(
+            [zone.zone_id for zone in status.logical_run.remaining_queued_zones],
+            ["zone-1"],
+        )
+        self.assertEqual(status.logical_run.current_zone_remaining_seconds, 75)
+        self.assertFalse(status.logical_run.physical_state_verified)
+
+    def test_command_status_fails_closed_for_ineligible_or_malformed_skip(self) -> None:
+        cases = [
+            ({"state": "running", "source": "scheduled", "can_skip": True,
+              "remaining_queued_zones": [{"zone_number": 2}]}, "running"),
+            ({"state": "running", "source": "dashboard_manual", "can_skip": True,
+              "remaining_queued_zones": []}, "running"),
+            ({"state": "idle", "source": "dashboard_manual", "can_skip": True,
+              "remaining_queued_zones": [{"zone_number": 2}]}, "idle"),
+            ({"state": "running", "source": "dashboard_manual", "can_skip": True,
+              "remaining_queued_zones": [{"not_a_zone": True}]}, "running"),
+        ]
+        for logical_run, expected_state in cases:
+            with self.subTest(logical_run=logical_run), patch(
+                "app.server._sprinkler_response",
+                new=AsyncMock(return_value={
+                    "snapshot": {
+                        "watering_state": {"state": "idle"},
+                        "logical_run": logical_run,
+                    }
+                }),
+            ), patch("app.server.audit.latest_tool_call", return_value=None):
+                status = asyncio.run(get_sprinkler_command_status())
+                self.assertEqual(status.logical_run.state, expected_state)
+                self.assertFalse(status.logical_run.can_skip)
 
     def test_history_reports_timezone_ambiguous_omissions(self) -> None:
         valid_start = datetime.now(UTC).replace(microsecond=0) - timedelta(hours=1)
@@ -654,6 +778,9 @@ class SprinklerContractTests(unittest.TestCase):
             result = asyncio.run(get_sprinkler_capabilities())
         capabilities = {item.capability: item for item in result.capabilities}
         self.assertFalse(capabilities["schedule_mutations"].supported)
+        self.assertTrue(capabilities["pause_resume_logical_run"].supported)
+        self.assertTrue(capabilities["active_sequence_zone_skip"].supported)
+        self.assertFalse(capabilities["native_schedule_manual_skip"].supported)
         self.assertFalse(
             capabilities["physical_valve_flow_electrical_fault_feedback"].supported
         )

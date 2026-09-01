@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import json
 import hashlib
@@ -48,6 +49,7 @@ from scripts.production_mcp_verify import (
     LAN_PROBE_SERVICES,
     NEW_CAPABILITY_TOOLS,
     SPRINKLER_COMMAND_TOOLS,
+    SPRINKLER_CONFIRMATION_TOOLS,
     SPRINKLER_READ_REQUESTS,
     _access_token,
     _assert_sanitized,
@@ -97,6 +99,17 @@ class ProductionVerifierCompatibilityTests(unittest.TestCase):
         self.assertTrue(SPRINKLER_COMMAND_TOOLS.isdisjoint(SPRINKLER_READ_REQUESTS))
         for name in SPRINKLER_COMMAND_TOOLS:
             self.assertNotIn(f'session.call_tool("{name}"', source)
+
+    def test_confirmed_logical_run_tools_are_closed_and_non_idempotent(self) -> None:
+        tools = {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
+        for name in SPRINKLER_CONFIRMATION_TOOLS:
+            with self.subTest(tool=name):
+                tool = tools[name]
+                self.assertEqual(set(tool.input_schema["properties"]), {"confirmed"})
+                self.assertFalse(tool.input_schema["properties"]["confirmed"]["default"])
+                self.assertTrue(tool.annotations.destructive_hint)
+                self.assertFalse(tool.annotations.idempotent_hint)
+                self.assertFalse(tool.annotations.open_world_hint)
 
     def test_report_requires_every_sprinkler_read_and_live_inventory(self) -> None:
         read_only = {
@@ -278,7 +291,7 @@ class ProductionVerifierSchemaTests(unittest.IsolatedAsyncioTestCase):
     async def test_all_production_verifier_requests_match_advertised_schemas(self) -> None:
         tools = {tool.name: tool for tool in await mcp.list_tools()}
         contract = json.loads(
-            Path("tests/fixtures/server-contract-2.7.7.json").read_text(encoding="utf-8")
+            Path("tests/fixtures/server-contract-2.7.8.json").read_text(encoding="utf-8")
         )
         self.assertEqual(EXPECTED_VERSION, SERVER_VERSION)
         self.assertEqual(EXPECTED_TOOL_COUNT, len(tools))
@@ -305,6 +318,15 @@ class ProductionVerifierSchemaTests(unittest.IsolatedAsyncioTestCase):
                         if tool.annotations is not None
                         else None
                     )
+                    for name, tool in tools.items()
+                }
+            ),
+        )
+        self.assertEqual(
+            contract["tool_metadata_sha256"],
+            canonical(
+                {
+                    name: {"title": tool.title, "description": tool.description}
                     for name, tool in tools.items()
                 }
             ),
