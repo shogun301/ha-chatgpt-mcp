@@ -901,6 +901,7 @@ class WyzeOverlayDeploymentSecurityTests(unittest.TestCase):
         self.assertLess(backup_at, mutation_at)
         self.assertIn("python -m py_compile", self.text)
         self.assertIn("yaml.safe_load", self.text)
+        self.assertIn("len(value)==11", self.text)
         self.assertIn("--script check_config --config /config", self.text)
         self.assertGreaterEqual(self.text.count("docker restart homeassistant"), 2)
         self.assertIn("restore_backup", self.text)

@@ -345,7 +345,7 @@ sudo docker exec homeassistant python -m py_compile \
   "/config/$(basename "$stage_target")/irrigation_data.py" \
   "/config/$(basename "$stage_target")/sensor.py"
 sudo docker exec homeassistant python -c \
-  'import pathlib,yaml; p=pathlib.Path("/config")/"__STAGE_BASENAME__"/"services.yaml"; value=yaml.safe_load(p.read_text()); assert isinstance(value,dict) and len(value)==10'
+  'import pathlib,yaml; p=pathlib.Path("/config")/"__STAGE_BASENAME__"/"services.yaml"; value=yaml.safe_load(p.read_text()); assert isinstance(value,dict) and len(value)==11'
 
 overlay_stage='installing_candidate'
 mutated=1
