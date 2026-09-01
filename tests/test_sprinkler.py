@@ -423,6 +423,11 @@ class SprinklerContractTests(unittest.TestCase):
         self.assertEqual(status.last_mcp_command.zones[0].native_zone_id, "native-b")
 
     def test_history_reports_timezone_ambiguous_omissions(self) -> None:
+        valid_start = datetime.now(UTC).replace(microsecond=0) - timedelta(hours=1)
+        valid_end = valid_start + timedelta(minutes=5)
+        valid_start_text = valid_start.isoformat().replace("+00:00", "Z")
+        valid_end_text = valid_end.isoformat().replace("+00:00", "Z")
+        naive_start_text = valid_start.replace(tzinfo=None).isoformat()
         with (
             patch(
                 "app.server._sprinkler_zone_records",
@@ -439,7 +444,7 @@ class SprinklerContractTests(unittest.TestCase):
                                 "zone_runs": [
                                     {
                                         "zone_number": 1,
-                                        "started_at": "2026-08-29T12:00:00",
+                                        "started_at": naive_start_text,
                                         "timestamp_ambiguity": {
                                             "supported": False,
                                             "reason": "naive local timestamp",
@@ -451,9 +456,9 @@ class SprinklerContractTests(unittest.TestCase):
                                 "zone_runs": [
                                     {
                                         "zone_number": 1,
-                                        "started_at": "2026-08-29T12:00:00Z",
-                                        "start_time": "2026-08-29T12:00:00",
-                                        "ended_at": "2026-08-29T12:05:00Z",
+                                        "started_at": valid_start_text,
+                                        "start_time": naive_start_text,
+                                        "ended_at": valid_end_text,
                                         "timestamp_ambiguity": {
                                             "supported": False,
                                             "reason": "secondary alias is naive",

@@ -139,6 +139,7 @@ class WyzeIrrigationCoordinator(DataUpdateCoordinator):
                 "state": "idle",
                 "can_pause": False,
                 "can_resume": False,
+                "can_skip": False,
                 "can_stop": False,
             }
         result = copy.deepcopy(self._logical_run)
@@ -148,8 +149,14 @@ class WyzeIrrigationCoordinator(DataUpdateCoordinator):
         result["current_zone"] = copy.deepcopy(zones[index]) if index < len(zones) else None
         result["remaining_queued_zones"] = copy.deepcopy(zones[index + 1 :])
         state = result.get("state")
+        source = str(result.get("source") or "").lower()
         result["can_pause"] = state == "running"
         result["can_resume"] = state == "paused"
+        result["can_skip"] = (
+            state == "running"
+            and source == "dashboard_manual"
+            and index + 1 < len(zones)
+        )
         result["can_stop"] = state in {"running", "paused"}
         return result
 
@@ -832,6 +839,115 @@ class WyzeIrrigationCoordinator(DataUpdateCoordinator):
             )
             await self.async_request_refresh()
         await self._async_wait_for_idle()
+
+    async def async_skip(
+        self, command_id: str | None = None, source: str = "service"
+    ) -> None:
+        """Advance a dashboard-owned multi-zone run to its next queued zone."""
+        async with self._command_lock:
+            snapshot = self.logical_run_snapshot()
+            if not snapshot.get("can_skip"):
+                raise HomeAssistantError(
+                    "Skip is valid only while a manual multi-zone quick run has a queued zone"
+                )
+            run_id = str(self._logical_run["run_id"])
+            task = self._managed_run_task
+            self._managed_run_task = None
+            self._logical_generation += 1
+            generation = self._logical_generation
+            self._logical_deadline_monotonic = None
+            self._logical_run["state"] = "skipping"
+            self._logical_run["current_zone_remaining_seconds"] = 0
+            self._logical_run["updated_at"] = datetime.now(timezone.utc).isoformat()
+            self._logical_run["correlation"]["latest_command_id"] = command_id
+            self._logical_run["correlation"]["latest_source"] = source
+            self._notify_logical_run_changed()
+        await self._cancel_managed_task(task)
+
+        next_started = False
+        try:
+            async with self._command_lock:
+                if (
+                    self._logical_run is None
+                    or self._logical_run.get("run_id") != run_id
+                    or self._logical_run.get("state") != "skipping"
+                    or self._logical_generation != generation
+                ):
+                    raise HomeAssistantError("The logical run changed before skip completed")
+                await self.service.stop_running_schedule(self.device)
+                self._set_command_pending(
+                    "skip",
+                    command_id=command_id,
+                    logical_run_id=run_id,
+                    source=source,
+                    skipped_zone_number=snapshot["current_zone"]["zone_number"],
+                )
+                await self.async_request_refresh()
+            await self._async_wait_for_idle()
+
+            async with self._command_lock:
+                if (
+                    self._logical_run is None
+                    or self._logical_run.get("run_id") != run_id
+                    or self._logical_run.get("state") != "skipping"
+                    or self._logical_generation != generation
+                ):
+                    raise HomeAssistantError("The logical run changed before skip advanced")
+                next_index = int(self._logical_run["current_index"]) + 1
+                zones = self._logical_run["zones"]
+                zone = zones[next_index]
+                remaining = int(zone["duration_seconds"])
+                await self.service.start_zone(
+                    self.device,
+                    int(zone["zone_number"]),
+                    int(zone["provider_duration_seconds"]),
+                )
+                next_started = True
+                self._logical_run["state"] = "running"
+                self._logical_run["current_index"] = next_index
+                self._logical_run["current_zone_remaining_seconds"] = remaining
+                self._logical_run["updated_at"] = datetime.now(timezone.utc).isoformat()
+                self._logical_deadline_monotonic = time.monotonic() + remaining
+                self._set_command_pending(
+                    "skip",
+                    command_id=command_id,
+                    logical_run_id=run_id,
+                    source=source,
+                    current_zone_number=zone["zone_number"],
+                    duration_seconds=remaining,
+                    provider_duration_seconds=zone["provider_duration_seconds"],
+                    remaining_queued_zones=copy.deepcopy(zones[next_index + 1 :]),
+                    scheduled_stop_at=(
+                        datetime.now(timezone.utc) + timedelta(seconds=remaining)
+                    ).isoformat(),
+                )
+                await self.async_request_refresh()
+                self._managed_run_task = self.hass.async_create_task(
+                    self._async_complete_managed_runs(run_id, generation),
+                    f"Continue skipped Home Assistant-managed Wyze sprinkler sequence {run_id}",
+                )
+                self._notify_logical_run_changed()
+        except Exception as err:
+            async with self._command_lock:
+                current = (
+                    self._logical_run is not None
+                    and self._logical_run.get("run_id") == run_id
+                    and self._logical_generation == generation
+                )
+                if current:
+                    self._clear_logical_run_locked()
+            if current:
+                self._notify_logical_run_changed()
+            if next_started:
+                try:
+                    async with self._command_lock:
+                        await self.service.stop_running_schedule(self.device)
+                        await self.async_request_refresh()
+                except Exception:
+                    pass
+            if isinstance(err, HomeAssistantError):
+                raise
+            raise HomeAssistantError(f"Unable to skip sprinkler zone: {err}") from err
 
     async def async_shutdown(self) -> None:
         """Fail closed by abandoning every queued zone during integration unload."""

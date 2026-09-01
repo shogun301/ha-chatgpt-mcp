@@ -883,13 +883,13 @@ class WyzeOverlayDeploymentSecurityTests(unittest.TestCase):
         self.assertIn("test \"$current\" = \"${base_hashes[$name]}\"", self.text)
         self.assertIn("predecessor_hashes", self.text)
         for predecessor_hash in (
-            "1F5C6BC3E598B427BA94578FFC265C11A2727EB354DF9A9F40234D2EEF65D26B",
-            "6C0937ACDDB9FCE385808E86AF9DFF66383AB36ED48C72A871E006096DE15A7A",
-            "24531253DC5445C3D7F16D91CD6727BA9D2DB457CD81098A0471419AD88E2140",
-            "35DE1420A995018A91BCDA63B72F300C78A515B4566CD8541DC32D0D3A918684",
-            "38D5090DD7B4B9D5AF8DA56F349D8FC72E2D400E5633B39FE78DCCDB8616A30A",
-            "95D9B4FFDDFE3199C6C98B62D30338350DAA8E5F6F29C1E501E2BDB53AF604BA",
-            "78AF1900649BBB53DC074F66B998C8F5EBFC16AA924B59BA6D788B7F04BA0E08",
+            "AA5EFC126CF1A42AC4157FBF64AB361446A30E4B2ED73FC2EBB4A4D4C9C614F1",
+            "0AABDD062C99D056546F4AE1EC779502A679FF863F51F279C5960762F93A0C67",
+            "45011A7119E381FF2E5E4DB2DCECDD6B43CB2B62B97F170A88912B3F590A2CAA",
+            "12E20B7A600416910FD2580FD6F236FD91F2D18FF81153ED203ABBDB1C205313",
+            "917FA0D0E90EA5314118F1ACDAAFA96F82E2DF4C5B544D246BFE2C5D62CFC38D",
+            "3083870E8EA5D872097C78D31D383410F97C434CECB6021D781AC0DBABE9CB03",
+            "DD2DA1FEF54E4690EB5764D00A7F21F781327D5D0B2A08568C83F2EA0F5CE216",
         ):
             self.assertIn(predecessor_hash, self.text)
         self.assertIn("printf '%s  %s", self.text)
@@ -954,7 +954,7 @@ class WyzeOverlayDeploymentSecurityTests(unittest.TestCase):
             r"api/services/wyzeapi/(?:run_sprinkler|stop_sprinkler|refresh_sprinkler)",
         )
         self.assertIn("?return_response", self.text)
-        self.assertIn('item.get("integration_version") == "0.1.44"', self.text)
+        self.assertIn('item.get("integration_version") == "0.1.45"', self.text)
 
     def test_main_deploy_orders_overlay_before_mcp_release(self) -> None:
         main = (ROOT / "scripts" / "deploy-production.ps1").read_text(encoding="utf-8")

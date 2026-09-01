@@ -2,7 +2,7 @@
 
 This directory is a deterministic, sprinkler-only overlay for the installed
 `custom_components/wyzeapi` integration. It adds normalized read surfaces,
-four response-only Home Assistant services, and six bounded sprinkler command
+four response-only Home Assistant services, and seven bounded sprinkler command
 services.
 
 The two run services accept exactly one of `duration_seconds` or the legacy
@@ -11,7 +11,8 @@ legacy decimal minutes are rounded to the nearest second before construction.
 Home Assistant owns every logical run timer and ordered queue, commands only the
 current zone, and issues stop at the requested duration. Pause captures the
 current-zone remainder and queue; resume restarts that remainder before the
-queued zones; stop abandons the entire run before touching the provider. The
+queued zones; skip advances only a dashboard-owned multi-zone run; stop
+abandons the entire run before touching the provider. The
 coordinator requires affirmative idle before starting or advancing: either
 controller-reported idle or a controller-reported `past`/finished schedule run.
 Truly unknown watering state remains fail-closed and does not send a provider
@@ -25,7 +26,7 @@ public source artifact.
 
 The base manifest reports version `0.1.39` and SHA-256
 `8C1551778463D995413F6A71739ADC53D820DED0CB069EF08E7DBB7A6395F1BC`.
-The overlay replaces it with version `0.1.44` so deployed source has a visible,
+The overlay replaces it with version `0.1.45` so deployed source has a visible,
 deterministic integration identity.
 Before deployment, require all replacement-file hashes below to match the
 destination. A mismatch is a stop-and-reinspect concurrency guard; do not copy
@@ -41,19 +42,19 @@ the overlay over a divergent integration.
 | `sensor.py` | `3AF7296A87C8B0EA0CDE2E98CE6A05BA81846FE8631D8DD09E5B1954E62DAC15` |
 | `services.yaml` | `F69AF27ABBF54435C1A978DBF791F8CDA8D8500187FE4067EE90C18D661A2950` |
 
-An upgrade from the immediately preceding overlay 0.1.43 accepts only this
-second exact hash set. These are the tracked 0.1.43 blobs from the public source
+An upgrade from the immediately preceding overlay 0.1.44 accepts only this
+second exact hash set. These are the tracked 0.1.44 blobs from the public source
 commit; accepting them does not broaden the destination-file guard.
 
-| Replacement file | Required 0.1.43 predecessor SHA-256 |
+| Replacement file | Required 0.1.44 predecessor SHA-256 |
 | --- | --- |
-| `manifest.json` | `1F5C6BC3E598B427BA94578FFC265C11A2727EB354DF9A9F40234D2EEF65D26B` |
-| `__init__.py` | `6C0937ACDDB9FCE385808E86AF9DFF66383AB36ED48C72A871E006096DE15A7A` |
-| `const.py` | `24531253DC5445C3D7F16D91CD6727BA9D2DB457CD81098A0471419AD88E2140` |
-| `irrigation.py` | `35DE1420A995018A91BCDA63B72F300C78A515B4566CD8541DC32D0D3A918684` |
-| `irrigation_data.py` | `38D5090DD7B4B9D5AF8DA56F349D8FC72E2D400E5633B39FE78DCCDB8616A30A` |
-| `sensor.py` | `95D9B4FFDDFE3199C6C98B62D30338350DAA8E5F6F29C1E501E2BDB53AF604BA` |
-| `services.yaml` | `78AF1900649BBB53DC074F66B998C8F5EBFC16AA924B59BA6D788B7F04BA0E08` |
+| `manifest.json` | `AA5EFC126CF1A42AC4157FBF64AB361446A30E4B2ED73FC2EBB4A4D4C9C614F1` |
+| `__init__.py` | `0AABDD062C99D056546F4AE1EC779502A679FF863F51F279C5960762F93A0C67` |
+| `const.py` | `45011A7119E381FF2E5E4DB2DCECDD6B43CB2B62B97F170A88912B3F590A2CAA` |
+| `irrigation.py` | `12E20B7A600416910FD2580FD6F236FD91F2D18FF81153ED203ABBDB1C205313` |
+| `irrigation_data.py` | `917FA0D0E90EA5314118F1ACDAAFA96F82E2DF4C5B544D246BFE2C5D62CFC38D` |
+| `sensor.py` | `3083870E8EA5D872097C78D31D383410F97C434CECB6021D781AC0DBABE9CB03` |
+| `services.yaml` | `DD2DA1FEF54E4690EB5764D00A7F21F781327D5D0B2A08568C83F2EA0F5CE216` |
 
 Only those seven files are replaced. Back up the exact destination files first,
 copy the overlay into `custom_components/wyzeapi`, run an explicit Python syntax

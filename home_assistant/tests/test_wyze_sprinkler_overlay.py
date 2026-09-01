@@ -719,7 +719,7 @@ def test_capability_contract_returns_explicit_unsupported_signals() -> None:
         assert unsupported[capability]["supported"] is False
         assert unsupported[capability]["reason"]
     assert contract["physical_state_verified"] is False
-    assert contract["integration_version"] == "0.1.44"
+    assert contract["integration_version"] == "0.1.45"
     assert "physically-measured" not in contract["evidence_labels"]
     assert "unknown native units" in supported["modeled_zone_moisture"]["semantics"]
 
@@ -883,6 +883,7 @@ def _load_init_service_functions():
         "SERVICE_RUN_SPRINKLER_SEQUENCE": "run_sprinkler_sequence",
         "SERVICE_PAUSE_SPRINKLER": "pause_sprinkler",
         "SERVICE_RESUME_SPRINKLER": "resume_sprinkler",
+        "SERVICE_SKIP_SPRINKLER": "skip_sprinkler_zone",
         "SERVICE_STOP_SPRINKLER": "stop_sprinkler",
         "SERVICE_REFRESH_SPRINKLER": "refresh_sprinkler",
         "SERVICE_GET_SPRINKLER_SNAPSHOT": "get_sprinkler_snapshot",
@@ -918,6 +919,9 @@ def test_mocked_ha_response_services_are_response_only_and_do_not_actuate() -> N
 
         async def async_resume(self, command_id=None, source="service"):
             self.commands.append(("resume", command_id, source))
+
+        async def async_skip(self, command_id=None, source="service"):
+            self.commands.append(("skip", command_id, source))
 
         async def async_stop(self, command_id=None, source="service"):
             self.commands.append(("stop", command_id, source))
@@ -965,6 +969,7 @@ def test_mocked_ha_response_services_are_response_only_and_do_not_actuate() -> N
         "run_sprinkler_sequence",
         "pause_sprinkler",
         "resume_sprinkler",
+        "skip_sprinkler_zone",
         "stop_sprinkler",
         "refresh_sprinkler",
         "get_sprinkler_snapshot",
@@ -1008,6 +1013,9 @@ def test_mocked_ha_response_services_are_response_only_and_do_not_actuate() -> N
         await hass.services.registered["resume_sprinkler"][0](
             call(command_id="mcp-command-resume", source="dashboard")
         )
+        await hass.services.registered["skip_sprinkler_zone"][0](
+            call(command_id="mcp-command-skip", source="dashboard")
+        )
         await hass.services.registered["stop_sprinkler"][0](
             call(command_id="mcp-command-3", source="dashboard")
         )
@@ -1023,6 +1031,7 @@ def test_mocked_ha_response_services_are_response_only_and_do_not_actuate() -> N
         ),
         ("pause", "mcp-command-pause", "dashboard"),
         ("resume", "mcp-command-resume", "dashboard"),
+        ("skip", "mcp-command-skip", "dashboard"),
         ("stop", "mcp-command-3", "dashboard"),
     ]
     assert coordinator.reads == ["snapshot", ("runs", 48), "schedules", "capabilities"]
@@ -1051,7 +1060,7 @@ def test_command_id_validator_accepts_bounded_ids_and_rejects_opaque_values() ->
             raise AssertionError(f"invalid command source accepted: {value!r}")
 
 
-def test_mocked_ha_unload_removes_all_ten_services() -> None:
+def test_mocked_ha_unload_removes_all_eleven_services() -> None:
     namespace = _load_init_service_functions()
 
     class FakeServices:
@@ -1072,7 +1081,7 @@ def test_mocked_ha_unload_removes_all_ten_services() -> None:
     )
     entry = types.SimpleNamespace(entry_id="entry-1")
     assert asyncio.run(namespace["async_unload_entry"](hass, entry)) is True
-    assert len(hass.services.removed) == 10
+    assert len(hass.services.removed) == 11
 
 
 def test_sequence_queue_is_never_posted_to_the_provider() -> None:
@@ -1495,6 +1504,7 @@ def _load_logical_coordinator_harness():
         "_async_wait_for_idle",
         "async_pause",
         "async_resume",
+        "async_skip",
         "async_stop",
         "async_shutdown",
     }
@@ -1631,6 +1641,88 @@ def _load_logical_coordinator_harness():
     return fake, Clock, sleeper, calls, statuses, notifications
 
 
+def test_remaining_time_sensor_publishes_ha_owned_countdown_ticks() -> None:
+    source_path = OVERLAY / "sensor.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+    class_node = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef)
+        and node.name == "WyzeIrrigationRemainingTime"
+    )
+    module = ast.fix_missing_locations(
+        ast.Module(
+            body=[
+                ast.ImportFrom(
+                    module="__future__",
+                    names=[ast.alias(name="annotations")],
+                    level=0,
+                ),
+                class_node,
+            ],
+            type_ignores=[],
+        )
+    )
+
+    intervals = []
+
+    class BaseSensor:
+        def __init__(self, coordinator):
+            self.coordinator = coordinator
+
+        async def async_added_to_hass(self):
+            self.base_added = True
+
+        def async_on_remove(self, unsubscribe):
+            self.unsubscribe = unsubscribe
+
+    def track_interval(hass, callback_fn, interval):
+        intervals.append((hass, callback_fn, interval))
+        return "unsubscribe-countdown"
+
+    namespace = {
+        "WyzeIrrigationBaseSensor": BaseSensor,
+        "SensorDeviceClass": types.SimpleNamespace(DURATION="duration"),
+        "UnitOfTime": types.SimpleNamespace(SECONDS="s"),
+        "callback": lambda function: function,
+        "datetime": __import__("datetime"),
+        "async_track_time_interval": track_interval,
+    }
+    exec(compile(module, str(source_path), "exec"), namespace)
+
+    logical_run = {"state": "running", "current_zone_remaining_seconds": 42}
+    coordinator = types.SimpleNamespace(
+        data={"remaining_seconds": 300},
+        logical_run_snapshot=lambda: dict(logical_run),
+    )
+    sensor = namespace["WyzeIrrigationRemainingTime"](coordinator)
+    sensor.hass = object()
+    writes = []
+    sensor.async_write_ha_state = lambda: writes.append(sensor.native_value)
+
+    asyncio.run(sensor.async_added_to_hass())
+    assert sensor.base_added is True
+    assert sensor.unsubscribe == "unsubscribe-countdown"
+    assert len(intervals) == 1
+    assert intervals[0][2] == __import__("datetime").timedelta(seconds=1)
+    assert sensor.native_value == 42
+
+    intervals[0][1](None)
+    assert writes == [42]
+    logical_run["current_zone_remaining_seconds"] = 41
+    intervals[0][1](None)
+    assert writes == [42, 41]
+
+    logical_run.update(state="paused", current_zone_remaining_seconds=40)
+    intervals[0][1](None)
+    assert writes == [42, 41]
+    assert sensor.native_value == 40
+
+    logical_run.clear()
+    logical_run["state"] = "idle"
+    assert sensor.native_value == 300
+
+
 async def _wait_for_sleep_count(sleeper, expected):
     for _ in range(100):
         if len(sleeper.requests) >= expected:
@@ -1739,12 +1831,105 @@ def test_stop_running_or_paused_abandons_every_queued_zone() -> None:
     asyncio.run(exercise())
 
 
-def test_idle_pause_resume_and_stop_are_rejected_without_provider_calls() -> None:
+def test_skip_advances_only_dashboard_owned_multi_zone_runs() -> None:
+    async def exercise():
+        fake, _clock, sleeper, calls, statuses, _notifications = (
+            _load_logical_coordinator_harness()
+        )
+        await fake.async_start_sequence(
+            [
+                {"zone": 1, "duration_seconds": 120},
+                {"zone": 2, "duration_seconds": 30},
+                {"zone": 3, "duration_seconds": 60},
+            ],
+            command_id="manual-sequence",
+            source="dashboard_manual",
+        )
+        await _wait_for_sleep_count(sleeper, 1)
+        assert fake.logical_run_snapshot()["can_skip"] is True
+        await fake.async_skip(command_id="skip-zone-1", source="dashboard")
+        await _wait_for_sleep_count(sleeper, 2)
+        snapshot = fake.logical_run_snapshot()
+        assert snapshot["state"] == "running"
+        assert snapshot["current_zone"]["zone_number"] == 2
+        assert snapshot["current_zone_remaining_seconds"] == 30
+        assert [item["zone_number"] for item in snapshot["remaining_queued_zones"]] == [3]
+        assert calls[:3] == [("start", 1, 120), ("stop",), ("start", 2, 60)]
+        assert statuses[-1][0] == "skip"
+        assert statuses[-1][2]["current_zone_number"] == 2
+        await fake.async_skip(command_id="skip-zone-2", source="dashboard")
+        await _wait_for_sleep_count(sleeper, 3)
+        snapshot = fake.logical_run_snapshot()
+        assert snapshot["current_zone"]["zone_number"] == 3
+        assert snapshot["remaining_queued_zones"] == []
+        assert snapshot["can_skip"] is False
+        calls_before_rejected_final_skip = list(calls)
+        try:
+            await fake.async_skip(command_id="invalid-final-skip")
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("final zone accepted a skip without a queued zone")
+        assert calls == calls_before_rejected_final_skip
+        await fake.async_stop(command_id="cleanup")
+
+        fake, _clock, sleeper, calls, _statuses, _notifications = (
+            _load_logical_coordinator_harness()
+        )
+        await fake.async_start_sequence(
+            [
+                {"zone": 1, "duration_seconds": 120},
+                {"zone": 2, "duration_seconds": 120},
+            ],
+            source="scheduled",
+        )
+        await _wait_for_sleep_count(sleeper, 1)
+        assert fake.logical_run_snapshot()["can_skip"] is False
+        try:
+            await fake.async_skip(command_id="invalid-scheduled-skip")
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("scheduled run accepted a dashboard skip")
+        assert calls == [("start", 1, 120)]
+        await fake.async_stop(command_id="cleanup")
+
+        fake, _clock, sleeper, calls, _statuses, _notifications = (
+            _load_logical_coordinator_harness()
+        )
+        await fake.async_start_sequence(
+            [
+                {"zone": 1, "duration_seconds": 120},
+                {"zone": 2, "duration_seconds": 120},
+            ],
+            source="dashboard_manual",
+        )
+        await _wait_for_sleep_count(sleeper, 1)
+        await fake.async_pause(command_id="pause-before-invalid-skip")
+        calls_before_paused_skip = list(calls)
+        try:
+            await fake.async_skip(command_id="invalid-paused-skip")
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("paused run accepted a skip")
+        assert calls == calls_before_paused_skip
+        await fake.async_stop(command_id="cleanup")
+
+    asyncio.run(exercise())
+
+
+def test_idle_pause_resume_skip_and_stop_are_rejected_without_provider_calls() -> None:
     async def exercise():
         fake, _clock, _sleeper, calls, _statuses, _notifications = (
             _load_logical_coordinator_harness()
         )
-        for method in (fake.async_pause, fake.async_resume, fake.async_stop):
+        for method in (
+            fake.async_pause,
+            fake.async_resume,
+            fake.async_skip,
+            fake.async_stop,
+        ):
             try:
                 await method(command_id="idle-invalid")
             except RuntimeError:
@@ -1824,7 +2009,7 @@ def test_overlay_manifest_and_base_guard_are_deterministic() -> None:
     readme = (OVERLAY.parents[1] / "README.md").read_text(encoding="utf-8")
 
     assert manifest["domain"] == "wyzeapi"
-    assert manifest["version"] == "0.1.44"
+    assert manifest["version"] == "0.1.45"
     for filename in (
         "manifest.json",
         "__init__.py",

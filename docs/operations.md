@@ -113,14 +113,14 @@ independently reviewed overlay-only deployment, use:
 
 The deployer accepts only a clean checkout at that commit and archives only the
 tracked overlay. It requires every destination runtime file to match either the
-documented 0.1.39 base hash or the exact 0.1.43 predecessor hash. Before copying,
+documented 0.1.39 base hash or the exact 0.1.44 predecessor hash. Before copying,
 it creates a root-only component backup under
 `/opt/homeassistant/wyzeapi-overlay-backups`, syntax-checks all Python modules,
 parses `services.yaml`, and runs the Home Assistant configuration checker.
 
 Loading new Python modules requires a full `homeassistant` container restart;
 a config-entry reload is not acceptance. After the restart, the deployer
-requires the ten exact `wyzeapi` services and invokes only
+requires the eleven exact `wyzeapi` services and invokes only
 `get_sprinkler_snapshot`, `get_sprinkler_schedule_runs`,
 `get_sprinkler_schedules`, and `get_sprinkler_capabilities` with response data.
 It never calls refresh, run, sequence, stop, or an automation. A post-copy

@@ -180,7 +180,7 @@ controller device with bounded literal zone and runtime inputs. Set
 
 Wyze's private sprinkler API has no stable official programming contract. The
 bundled [`home_assistant/wyzeapi_overlay`](home_assistant/wyzeapi_overlay/README.md)
-adds four response-only services, six bounded command services, and preserves exact native identifiers while
+adds four response-only services, seven bounded command services, and preserves exact native identifiers while
 normalizing zones as `zone-1` through `zone-8`. Every sprinkler output labels
 its evidence as commanded, controller-reported, calculated, inferred, or
 physically measured. Current state is never described as physical valve-open

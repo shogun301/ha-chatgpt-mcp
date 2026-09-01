@@ -123,6 +123,26 @@ resume_sprinkler:
       selector:
         text:
 
+skip_sprinkler_zone:
+  name: Skip sprinkler zone
+  description: Stop the current zone and advance to the next queued zone of a dashboard-owned multi-zone quick run.
+  target:
+    device:
+      integration: wyzeapi
+  fields:
+    command_id:
+      name: Command ID
+      description: Optional bounded caller correlation ID.
+      required: false
+      selector:
+        text:
+    source:
+      name: Source
+      description: Optional bounded caller source label.
+      required: false
+      selector:
+        text:
+
 stop_sprinkler:
   name: Stop sprinkler
   description: Abandon the complete running or paused logical run, including every queued zone, and stop the current zone when needed.

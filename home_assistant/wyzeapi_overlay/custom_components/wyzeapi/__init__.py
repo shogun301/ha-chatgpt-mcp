@@ -41,6 +41,7 @@ from .const import (
     SERVICE_RESUME_SPRINKLER,
     SERVICE_RUN_SPRINKLER_SEQUENCE,
     SERVICE_RUN_SPRINKLER_ZONE,
+    SERVICE_SKIP_SPRINKLER,
     SERVICE_STOP_SPRINKLER,
     WYZE_NOTIFICATION_TOGGLE,
 )
@@ -323,6 +324,13 @@ def async_register_irrigation_services(hass: HomeAssistant) -> None:
             source=call.data.get("source", "service"),
         )
 
+    async def skip(call: ServiceCall) -> None:
+        coordinator = coordinator_for_device_id(hass, _single_device_id(call))
+        await coordinator.async_skip(
+            command_id=call.data.get("command_id"),
+            source=call.data.get("source", "service"),
+        )
+
     async def stop(call: ServiceCall) -> None:
         coordinator = coordinator_for_device_id(hass, _single_device_id(call))
         await coordinator.async_stop(
@@ -420,6 +428,7 @@ def async_register_irrigation_services(hass: HomeAssistant) -> None:
     for service_name, handler in (
         (SERVICE_PAUSE_SPRINKLER, pause),
         (SERVICE_RESUME_SPRINKLER, resume),
+        (SERVICE_SKIP_SPRINKLER, skip),
         (SERVICE_STOP_SPRINKLER, stop),
     ):
         if not hass.services.has_service(DOMAIN, service_name):
@@ -488,6 +497,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             SERVICE_RUN_SPRINKLER_SEQUENCE,
             SERVICE_PAUSE_SPRINKLER,
             SERVICE_RESUME_SPRINKLER,
+            SERVICE_SKIP_SPRINKLER,
             SERVICE_STOP_SPRINKLER,
             SERVICE_REFRESH_SPRINKLER,
             SERVICE_GET_SPRINKLER_SNAPSHOT,

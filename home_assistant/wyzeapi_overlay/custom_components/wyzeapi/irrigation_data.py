@@ -1352,6 +1352,12 @@ def sprinkler_capabilities() -> dict[str, Any]:
             "semantics": "pause retains the current-zone remainder and complete local queue; resume restarts that remainder before queued zones",
         },
         {
+            "capability": "skip_manual_sequence_zone",
+            "supported": True,
+            "access": "command",
+            "semantics": "a dashboard-owned multi-zone quick run may stop its current zone and advance to the next retained zone",
+        },
+        {
             "capability": "stop_watering",
             "supported": True,
             "access": "command",
@@ -1396,7 +1402,7 @@ def sprinkler_capabilities() -> dict[str, Any]:
         },
     ]
     return {
-        "integration_version": "0.1.44",
+        "integration_version": "0.1.45",
         "supported": supported,
         "unsupported": unsupported,
         "evidence_labels": [

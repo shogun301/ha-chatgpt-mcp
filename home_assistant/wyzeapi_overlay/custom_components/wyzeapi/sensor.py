@@ -36,6 +36,7 @@ import homeassistant.helpers.entity_registry as er
 from homeassistant.helpers.event import (
     async_track_state_change_event,
     async_track_time_change,
+    async_track_time_interval,
 )
 
 from .const import (
@@ -603,6 +604,7 @@ class WyzeIrrigationStatus(WyzeIrrigationBaseSensor):
             "logical_run": logical_run,
             "can_pause": logical_run["can_pause"],
             "can_resume": logical_run["can_resume"],
+            "can_skip": logical_run["can_skip"],
             "can_stop": logical_run["can_stop"],
         }
 
@@ -646,8 +648,30 @@ class WyzeIrrigationRemainingTime(WyzeIrrigationBaseSensor):
 
     @property
     def native_value(self) -> int | None:
-        value = (self.coordinator.data or {}).get("remaining_seconds")
+        logical_run = self.coordinator.logical_run_snapshot()
+        value = (
+            logical_run.get("current_zone_remaining_seconds")
+            if logical_run.get("state") in {"running", "paused"}
+            else (self.coordinator.data or {}).get("remaining_seconds")
+        )
         return int(value) if value is not None else None
+
+    @callback
+    def _async_update_logical_countdown(self, _now: datetime.datetime) -> None:
+        """Publish each HA-owned logical-run countdown tick without cloud polling."""
+        if self.coordinator.logical_run_snapshot().get("state") == "running":
+            self.async_write_ha_state()
+
+    async def async_added_to_hass(self) -> None:
+        """Subscribe the logical countdown sensor to one-second HA clock ticks."""
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            async_track_time_interval(
+                self.hass,
+                self._async_update_logical_countdown,
+                datetime.timedelta(seconds=1),
+            )
+        )
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
