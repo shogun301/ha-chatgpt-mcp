@@ -384,12 +384,12 @@ class DeploymentScriptSecurityTests(unittest.TestCase):
             if re.match(r"^\s*(?:sudo\s+)?install\b", line):
                 cls.install_commands.append(shlex.split(line.strip(), posix=True))
 
-    def test_release_is_pinned_to_2_7_8(self) -> None:
+    def test_release_is_pinned_to_2_7_9(self) -> None:
         self.assertRegex(
             self.text,
-            r"(?m)^\s*\$releaseVersion\s*=\s*['\"]2\.7\.8['\"]\s*$",
+            r"(?m)^\s*\$releaseVersion\s*=\s*['\"]2\.7\.9['\"]\s*$",
         )
-        self.assertRegex(self.text, r"(?m)^\s*release_version=['\"]2\.7\.8['\"]\s*$")
+        self.assertRegex(self.text, r"(?m)^\s*release_version=['\"]2\.7\.9['\"]\s*$")
 
     def test_tests_run_before_main_container_recreation(self) -> None:
         main = self.text[
@@ -460,7 +460,7 @@ class DeploymentScriptSecurityTests(unittest.TestCase):
             self.text.index("stage='validating_runtime_hardening'")
         ]
         self.assertIn("for attempt in $(seq 1 180)", fixed)
-        self.assertIn('p.get("service_version") == "2.7.8"', fixed)
+        self.assertIn('p.get("service_version") == "2.7.9"', fixed)
         self.assertIn('[ "$fixed_routes_ready" -eq 1 ]', fixed)
 
     def test_retention_check_parses_full_iso_date_suffix(self) -> None:
@@ -608,6 +608,23 @@ class DeploymentScriptSecurityTests(unittest.TestCase):
         self.assertEqual(self.text.count("docker restart homeassistant"), 1)
         self.assertIn("rollback_overlay", self.text)
         self.assertIn("overlay_target='/opt/homeassistant/config/custom_components/wyzeapi'", self.text)
+        self.assertIn(
+            "solaredge_target='/opt/homeassistant/config/custom_components/solaredge_one_bridge'",
+            self.text,
+        )
+        self.assertIn("stage='verifying_live_solaredge_bridge_source'", self.text)
+        self.assertIn(
+            'sudo cmp --silent "$solaredge_candidate/$name" "$solaredge_target/$name"',
+            self.text,
+        )
+        self.assertIn('get("version") == "1.3.1"', self.text)
+        self.assertIn("stage='verifying_live_solaredge_bridge_endpoint'", self.text)
+        self.assertIn(
+            "http://127.0.0.1:8000/internal/solaredge/full-data",
+            self.text,
+        )
+        self.assertIn('s.get("power_flow") is True', self.text)
+        self.assertIn('s.get("lifetime_energy") is True', self.text)
         self.assertNotRegex(
             self.text,
             r"(?mi)^\s*(?:sudo\s+)?docker\s+compose\s+(?:exec|restart|stop|kill|rm|up)\b[^\r\n]*(?:^|\s)['\"]?homeassistant['\"]?(?:\s|$)",

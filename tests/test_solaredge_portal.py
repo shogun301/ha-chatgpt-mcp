@@ -276,6 +276,10 @@ class EndpointAndNormalizationTests(PortalTestCase):
                     "hasStorage": True,
                     "hasAcStorage": True,
                     "hasDcStorage": False,
+                    "hasSmartDevices": True,
+                    "viewerType": "OWNER",
+                    "inverterCount": 2,
+                    "siteId": "must-not-leak",
                 },
                 {"currentPower": 2},
                 {"solarProduction": {"currentPower": 7.59}},
@@ -285,6 +289,10 @@ class EndpointAndNormalizationTests(PortalTestCase):
         live = asyncio.run(client.live_power())
         flow = asyncio.run(client.live_power_flow())
         self.assertTrue(capabilities["has_consumption_and_grid"])
+        self.assertTrue(capabilities["has_smart_devices"])
+        self.assertEqual(capabilities["viewer_type"], "OWNER")
+        self.assertEqual(capabilities["inverter_count"], 2)
+        self.assertNotIn("must-not-leak", json.dumps(capabilities))
         self.assertEqual(live["current_power_w"], 2000)
         self.assertEqual(
             flow["components"]["solar_production"]["current_power_w"], 7590
@@ -333,6 +341,10 @@ class EndpointAndNormalizationTests(PortalTestCase):
                         "actor": "not-for-public-output",
                         "authorization": "secret-value",
                     },
+                    "isRealTime": True,
+                    "isCommunicating": False,
+                    "updateRefreshRate": 5,
+                    "energyProducers": [{"id": "redacted-by-sanitizer"}],
                 }
             ],
         )
@@ -355,6 +367,11 @@ class EndpointAndNormalizationTests(PortalTestCase):
         )
         self.assertNotIn("actor", str(result))
         self.assertNotIn("secret-value", str(result))
+        self.assertIs(result["is_real_time"], True)
+        self.assertIs(result["is_communicating"], False)
+        self.assertEqual(result["update_refresh_rate_seconds"], 5)
+        self.assertEqual(result["energy_producer_count"], 1)
+        self.assertNotIn("redacted-by-sanitizer", json.dumps(result))
 
     def test_live_flow_accepts_scalar_storage_plan_metadata(self) -> None:
         client = _RecordingPortal(

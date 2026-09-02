@@ -20,7 +20,7 @@ if ($SshAddress -and (
     throw 'SshAddress must be a literal IPv4 address.'
 }
 
-$releaseVersion = '2.7.8'
+$releaseVersion = '2.7.9'
 $sourceRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $secretRoot = if ($SecretStagingPath) { [IO.Path]::GetFullPath($SecretStagingPath) } else { $null }
 $requiredSecrets = @(
@@ -114,12 +114,12 @@ set -Eeuo pipefail
 set +x
 umask 077
 
-release_version='2.7.8'
+release_version='2.7.9'
 release_commit='__RELEASE_COMMIT__'
 preflight_only='__PREFLIGHT_ONLY__'
 reuse_verified_overlay='__REUSE_VERIFIED_OVERLAY__'
 archive_sha256='__ARCHIVE_SHA256__'
-archive_path='/tmp/ha-chatgpt-mcp-2.7.8.tar.gz'
+archive_path='/tmp/ha-chatgpt-mcp-2.7.9.tar.gz'
 candidate_tag="ha-chatgpt-mcp:candidate-$release_commit"
 release_stage=$(mktemp -d /tmp/ha-mcp-release.XXXXXX)
 app_root='/opt/ha-chatgpt-mcp'
@@ -157,6 +157,7 @@ overlay_mutated=0
 overlay_backup="/opt/homeassistant/wyzeapi-overlay-backups/wyzeapi-pre-0.1.45-main-$stamp.tar.gz"
 overlay_baseline='/tmp/ha-mcp-overlay-baseline'
 overlay_target='/opt/homeassistant/config/custom_components/wyzeapi'
+solaredge_target='/opt/homeassistant/config/custom_components/solaredge_one_bridge'
 homeassistant_started_before=''
 caddy_started_before=''
 stage='initializing'
@@ -479,6 +480,25 @@ cd "$release_stage"
 stage='auditing_clean_release'
 sudo /usr/bin/python3 scripts/public_release_audit.py --archive
 sudo chmod -R a+rX "$release_stage"
+stage='verifying_live_solaredge_bridge_source'
+solaredge_candidate="$release_stage/home_assistant/custom_components/solaredge_one_bridge"
+for name in \
+  manifest.json __init__.py binary_sensor.py client.py config_flow.py const.py \
+  coordinator.py export_events.py export_events_ha.py model.py sensor.py \
+  services.yaml strings.json translations/en.json; do
+  sudo test -f "$solaredge_candidate/$name"
+  sudo test -f "$solaredge_target/$name"
+  sudo cmp --silent "$solaredge_candidate/$name" "$solaredge_target/$name"
+done
+sudo python3 -c 'import json,sys; assert json.load(open(sys.argv[1], encoding="utf-8")).get("version") == "1.3.1"' \
+  "$solaredge_target/manifest.json"
+stage='verifying_live_solaredge_bridge_endpoint'
+solaredge_bridge_secret=$(sudo cat /opt/ha-chatgpt-mcp/secrets/solaredge_bridge_secret)
+curl --fail --silent --show-error --max-time 60 \
+  -H "X-SolarEdge-Bridge-Secret: $solaredge_bridge_secret" \
+  http://127.0.0.1:8000/internal/solaredge/full-data | \
+  sudo python3 -c 'import json,sys; p=json.load(sys.stdin); assert isinstance(p, dict) and p.get("connected") is True; s=p.get("endpoint_status"); assert isinstance(s, dict) and s.get("power_flow") is True and s.get("lifetime_energy") is True'
+unset solaredge_bridge_secret
 stage='building_mcp_image'
 sudo docker build --build-arg "VCS_REF=$release_commit" \
   -t "$candidate_tag" .
@@ -570,7 +590,7 @@ for attempt in $(seq 1 30); do
 done
 curl --fail --silent --max-time 5 http://127.0.0.1:8001/healthz \
   >/tmp/ha-mcp-preflight-health.json
-python3 -c 'import json; p=json.load(open("/tmp/ha-mcp-preflight-health.json", encoding="utf-8")); assert p.get("status") == "ok" and p.get("service_version") == "2.7.8"'
+python3 -c 'import json; p=json.load(open("/tmp/ha-mcp-preflight-health.json", encoding="utf-8")); assert p.get("status") == "ok" and p.get("service_version") == "2.7.9"'
 sudo docker exec "$preflight_container" python -m scripts.production_mcp_verify
 sudo docker rm -f "$preflight_container" >/dev/null
 rm -f /tmp/ha-mcp-preflight-health.json
@@ -756,7 +776,7 @@ with open('/tmp/ha-mcp-health.json', encoding='utf-8') as handle:
     payload = json.load(handle)
 assert payload.get('status') == 'ok'
 assert payload.get('home_assistant', {}).get('reachable') is True
-assert payload.get('service_version') == '2.7.8'
+assert payload.get('service_version') == '2.7.9'
 PY
 rm -f /tmp/ha-mcp-health.json
 curl --fail --silent --max-time 5 http://127.0.0.1:8123/ >/dev/null
@@ -768,7 +788,7 @@ for attempt in $(seq 1 180); do
     200|302|403)
       if curl --fail --silent --max-time 10 __PUBLIC_MCP_URL__/healthz \
           >/tmp/ha-mcp-public-health.json && \
-         python3 -c 'import json; p=json.load(open("/tmp/ha-mcp-public-health.json", encoding="utf-8")); assert p.get("status") == "ok" and p.get("service_version") == "2.7.8"'; then
+         python3 -c 'import json; p=json.load(open("/tmp/ha-mcp-public-health.json", encoding="utf-8")); assert p.get("status") == "ok" and p.get("service_version") == "2.7.9"'; then
         fixed_routes_ready=1
         break
       fi

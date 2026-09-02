@@ -104,7 +104,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 LOGGER = logging.getLogger("ha_chatgpt_mcp")
-SERVER_VERSION = "2.7.8"
+SERVER_VERSION = "2.7.9"
 audit = AuditLog(config.AUDIT_LOG_PATH)
 oauth = OAuthServer(
     OAuthStore(config.DATABASE_PATH),
@@ -1532,7 +1532,11 @@ async def _solaredge_lifetime_energy() -> dict[str, Any]:
 def _portal_local_date() -> datetime:
     timezone_name = str(config.SOLAREDGE_PORTAL_TIMEZONE or "UTC")
     try:
-        zone = ZoneInfo(timezone_name)
+        zone = (
+            UTC
+            if timezone_name.casefold() in {"utc", "etc/utc"}
+            else ZoneInfo(timezone_name)
+        )
     except ZoneInfoNotFoundError as exc:
         raise SolarEdgePortalError("SolarEdge portal timezone is invalid") from exc
     return datetime.now(zone)
@@ -1558,11 +1562,134 @@ def _component_text(component: Any, *keys: str) -> str:
     return ""
 
 
-async def _build_solaredge_bridge_snapshot() -> dict[str, Any]:
+def _component_bool(component: Any, *keys: str) -> bool | None:
+    if not isinstance(component, dict):
+        return None
+    for key in keys:
+        value = component.get(key)
+        if isinstance(value, bool):
+            return value
+    return None
+
+
+def _component_string(component: Any, *keys: str) -> str | None:
+    if not isinstance(component, dict):
+        return None
+    for key in keys:
+        value = component.get(key)
+        if isinstance(value, str):
+            normalized = value.strip()
+            if normalized and len(normalized) <= 128 and not any(
+                character in normalized for character in "\r\n\0"
+            ):
+                return normalized
+    return None
+
+
+def _mapping(value: Any, key: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    nested = value.get(key)
+    return nested if isinstance(nested, dict) else {}
+
+
+def _measurement_list(energy: dict[str, Any]) -> list[dict[str, Any]]:
+    chart = _mapping(energy, "chart")
+    measurements = chart.get("measurements")
+    if not isinstance(measurements, list):
+        return []
+    return [item for item in measurements if isinstance(item, dict)]
+
+
+def _latest_populated_measurement(energy: dict[str, Any]) -> dict[str, Any]:
+    for measurement in reversed(_measurement_list(energy)):
+        if any(
+            _component_number(measurement, key) is not None
+            for key in (
+                "production_kwh",
+                "consumption_kwh",
+                "import_kwh",
+                "export_kwh",
+            )
+        ):
+            return measurement
+    return {}
+
+
+def _storage_energy_kwh(component: Any, key: str) -> float | None:
+    normalized = _component_number(component, f"{key}_kwh")
+    if normalized is not None:
+        return normalized
+    watt_hours = _component_number(component, key)
+    return watt_hours / 1000.0 if watt_hours is not None else None
+
+
+async def _build_solaredge_bridge_full_data() -> dict[str, Any]:
+    """Fetch every privacy-safe portal surface used by the HA bridge."""
     provider = _require_solaredge_portal()
-    flow, lifetime = await asyncio.gather(
-        provider.live_power_flow(), _solaredge_lifetime_energy()
+    local_now = _portal_local_date()
+    local_today = local_now.date()
+    names = (
+        "capabilities",
+        "live_power",
+        "power_flow",
+        "current_day_energy",
+        "lifetime_energy",
+        "current_day_storage_distribution",
+        "battery_storage_state",
+        "current_day_battery_energy",
     )
+    values = await asyncio.gather(
+        provider.capabilities(),
+        provider.live_power(),
+        provider.live_power_flow(),
+        provider.current_day_energy_summary(local_date=local_today),
+        _solaredge_lifetime_energy(),
+        provider.storage_distribution(local_today, local_today),
+        provider.battery_storage_state(
+            local_now - timedelta(days=1),
+            local_now,
+        ),
+        provider.battery_energy(local_today, local_today),
+        return_exceptions=True,
+    )
+    data: dict[str, dict[str, Any]] = {}
+    endpoint_status: dict[str, bool] = {}
+    for name, value in zip(names, values, strict=True):
+        if isinstance(value, Exception):
+            if not isinstance(value, SolarEdgePortalError):
+                raise value
+            LOGGER.info("solaredge_optional_portal_surface_unavailable", extra={"surface": name})
+            data[name] = {}
+            endpoint_status[name] = False
+        elif isinstance(value, dict):
+            data[name] = value
+            endpoint_status[name] = True
+        else:
+            data[name] = {}
+            endpoint_status[name] = False
+
+    if not endpoint_status["power_flow"] or not endpoint_status["lifetime_energy"]:
+        raise SolarEdgePortalError("SolarEdge core snapshot surfaces are unavailable")
+    return {
+        "connected": True,
+        "provider": "solaredge_monitoring_portal",
+        "fetched_at": datetime.now(UTC).isoformat(),
+        "endpoint_status": endpoint_status,
+        **data,
+    }
+
+
+async def _build_solaredge_bridge_snapshot() -> dict[str, Any]:
+    full = await _build_solaredge_bridge_full_data()
+    flow = _mapping(full, "power_flow")
+    lifetime = _mapping(full, "lifetime_energy")
+    current_day = _mapping(full, "current_day_energy")
+    capabilities = _mapping(full, "capabilities")
+    live_power = _mapping(full, "live_power")
+    storage_distribution = _mapping(full, "current_day_storage_distribution")
+    battery_state = _mapping(full, "battery_storage_state")
+    battery_energy = _mapping(full, "current_day_battery_energy")
     components = flow.get("components", {})
     if not isinstance(components, dict):
         components = {}
@@ -1639,6 +1766,8 @@ async def _build_solaredge_bridge_snapshot() -> dict[str, Any]:
         consumption_distribution = {}
 
     site: dict[str, Any] = {
+        "bridge_fetched_at": full.get("fetched_at"),
+        "power_flow_last_update_time": flow.get("last_update_time"),
         "production_power_w": _component_number(solar, "current_power_w", "power_w"),
         "consumption_power_w": _component_number(
             consumption, "current_power_w", "power_w"
@@ -1668,13 +1797,271 @@ async def _build_solaredge_bridge_snapshot() -> dict[str, Any]:
         "storage_operating_plan_active": storage_operating_plan.get("is_active"),
         "storage_operating_plan_block_count": storage_operating_plan.get("block_count"),
     }
+    for key in (
+        "has_production",
+        "has_consumption_and_grid",
+        "has_storage",
+        "has_performance_ratio",
+        "has_smart_devices",
+        "has_ev_chargers",
+        "has_billing_cycle_program",
+        "show_inverter_graph",
+        "can_normalize_data",
+        "can_normalize_inverters_data",
+        "can_edit_billing_period",
+        "has_commercial_performance_ratio",
+        "has_generator",
+        "has_ac_storage",
+        "has_dc_storage",
+        "viewer_type",
+        "site_type",
+        "international_system_units",
+        "inverter_count",
+    ):
+        site[f"capability_{key}"] = capabilities.get(key)
+    for key, available in _mapping(full, "endpoint_status").items():
+        site[f"endpoint_{key}_available"] = available
+
+    site.update(
+        {
+            "portal_live_ac_power_w": _component_number(
+                live_power, "current_ac_power_w", "current_power_w"
+            ),
+            "maximum_ac_power_w": _component_number(
+                live_power, "max_ac_power_w", "maximum_ac_power_w"
+            ),
+            "power_flow_refresh_rate_seconds": _component_number(
+                flow, "update_refresh_rate_seconds"
+            ),
+            "power_flow_is_real_time": _component_bool(flow, "is_real_time"),
+            "power_flow_is_communicating": _component_bool(
+                flow, "is_communicating"
+            ),
+            "energy_producer_count": _component_number(
+                flow, "energy_producer_count"
+            ),
+        }
+    )
+
+    component_fields = {
+        "grid": grid,
+        "consumption": consumption,
+        "solar": solar,
+        "ac_storage": components.get("ac_storage", {}),
+        "dc_storage": components.get("dc_storage", {}),
+        "ev_charger": components.get("ev_charger", {}),
+    }
+    for prefix, component in component_fields.items():
+        site[f"{prefix}_component_active"] = _component_bool(
+            component, "is_active", "isActive"
+        )
+        site[f"{prefix}_component_status"] = _component_string(component, "status")
+        site[f"{prefix}_component_direction"] = _component_string(
+            component, "direction"
+        )
+        site[f"{prefix}_component_power_w"] = _component_number(
+            component, "current_power_w", "power_w"
+        )
+    site["consumption_component_is_consuming"] = _component_bool(
+        consumption, "is_consuming", "isConsuming"
+    )
+    site["solar_component_is_producing"] = _component_bool(
+        solar, "is_producing", "isProducing"
+    )
+    for prefix in ("ac_storage", "dc_storage"):
+        component = component_fields[prefix]
+        site[f"{prefix}_charge_level_pct"] = _component_number(
+            component,
+            "charge_level_pct",
+            "state_of_charge_pct",
+            "chargeLevel",
+            "stateOfCharge",
+        )
+        site[f"{prefix}_block_count"] = _component_number(
+            component, "block_count", "blockCount"
+        )
+        site[f"{prefix}_storage_plan"] = _component_string(
+            component, "storage_plan", "storagePlan"
+        )
+
+    def add_energy_summary(prefix: str, energy: dict[str, Any]) -> None:
+        energy_totals = _mapping(energy, "totals_kwh")
+        production_split = _mapping(energy, "production_distribution")
+        consumption_split = _mapping(energy, "consumption_distribution")
+        summary_metrics = _mapping(energy, "summary_metrics")
+        for public_name, source_name in (
+            ("production_energy_kwh", "production"),
+            ("consumption_energy_kwh", "consumption"),
+            ("grid_import_energy_kwh", "import"),
+            ("grid_export_energy_kwh", "export"),
+        ):
+            site[f"{prefix}_{public_name}"] = _component_number(
+                energy_totals, source_name
+            )
+        for public_name, source_name in (
+            ("production_to_home_energy_kwh", "production_to_home_kwh"),
+            ("production_to_battery_energy_kwh", "production_to_battery_kwh"),
+            ("production_to_grid_energy_kwh", "production_to_grid_kwh"),
+            ("production_unknown_energy_kwh", "production_unknown_kwh"),
+        ):
+            site[f"{prefix}_{public_name}"] = _component_number(
+                production_split, source_name
+            )
+        for public_name, source_name in (
+            ("production_to_home_pct", "productionToHomePercentage"),
+            ("production_to_battery_pct", "productionToBatteryPercentage"),
+            ("production_to_grid_pct", "productionToGridPercentage"),
+            ("production_unknown_pct", "productionUnknownPercentage"),
+        ):
+            site[f"{prefix}_{public_name}"] = _component_number(
+                production_split, source_name
+            )
+        for public_name, source_name in (
+            ("consumption_from_battery_energy_kwh", "consumption_from_battery_kwh"),
+            ("consumption_from_solar_energy_kwh", "consumption_from_solar_kwh"),
+            ("consumption_from_grid_energy_kwh", "consumption_from_grid_kwh"),
+        ):
+            site[f"{prefix}_{public_name}"] = _component_number(
+                consumption_split, source_name
+            )
+        for public_name, source_name in (
+            ("consumption_from_battery_pct", "consumptionFromBatteryPercentage"),
+            ("consumption_from_solar_pct", "consumptionFromSolarPercentage"),
+            ("consumption_from_grid_pct", "consumptionFromGridPercentage"),
+        ):
+            site[f"{prefix}_{public_name}"] = _component_number(
+                consumption_split, source_name
+            )
+        for key in (
+            "performance_ratio_pct",
+            "average_power_factor",
+            "self_consumption_ratio_pct",
+            "self_sufficiency_ratio_pct",
+            "site_availability_pct",
+            "yield",
+            "late_production_start_date",
+            "late_production_distribution_start_date",
+            "late_consumption_start_date",
+            "late_consumption_distribution_start_date",
+            "late_performance_ratio_start_date",
+            "late_yield_start_date",
+        ):
+            site[f"{prefix}_{key}"] = summary_metrics.get(key)
+        site[f"{prefix}_start_date"] = energy.get("start_date")
+        site[f"{prefix}_end_date"] = energy.get("end_date")
+        site[f"{prefix}_chart_time_unit"] = energy.get("chart_time_unit")
+        site[f"{prefix}_window_type"] = energy.get("window_type")
+        site[f"{prefix}_timezone"] = energy.get("timezone")
+        site[f"{prefix}_provider_timestamp"] = energy.get("provider_timestamp")
+        site[f"{prefix}_measurement_count"] = len(_measurement_list(energy))
+
+    add_energy_summary("today", current_day)
+    add_energy_summary("lifetime", lifetime)
+
+    latest = _latest_populated_measurement(current_day)
+    latest_production = _mapping(latest, "productionDistribution")
+    latest_consumption = _mapping(latest, "consumptionDistribution")
+    for public_name, source_name in (
+        ("production_energy_kwh", "production_kwh"),
+        ("consumption_energy_kwh", "consumption_kwh"),
+        ("grid_import_energy_kwh", "import_kwh"),
+        ("grid_export_energy_kwh", "export_kwh"),
+    ):
+        site[f"latest_interval_{public_name}"] = _component_number(
+            latest, source_name
+        )
+    for public_name, source_name in (
+        ("production_to_home_energy_kwh", "production_to_home_kwh"),
+        ("production_to_battery_energy_kwh", "production_to_battery_kwh"),
+        ("production_to_grid_energy_kwh", "production_to_grid_kwh"),
+        ("production_unknown_energy_kwh", "production_unknown_kwh"),
+    ):
+        site[f"latest_interval_{public_name}"] = _component_number(
+            latest_production, source_name
+        )
+    for public_name, source_name in (
+        ("consumption_from_battery_energy_kwh", "consumption_from_battery_kwh"),
+        ("consumption_from_solar_energy_kwh", "consumption_from_solar_kwh"),
+        ("consumption_from_grid_energy_kwh", "consumption_from_grid_kwh"),
+    ):
+        site[f"latest_interval_{public_name}"] = _component_number(
+            latest_consumption, source_name
+        )
+    site["latest_interval_start"] = _component_string(latest, "measurementTime")
+    site["latest_interval_weather"] = _component_string(
+        latest, "weatherDescription"
+    )
+    site["latest_interval_production_estimated"] = _component_bool(
+        latest_production, "estimated"
+    )
+    site["latest_interval_consumption_estimated"] = _component_bool(
+        latest_consumption, "estimated"
+    )
+
+    distribution = _mapping(storage_distribution, "distribution")
+    site["today_storage_distribution_start_date"] = storage_distribution.get(
+        "start_date"
+    )
+    site["today_storage_distribution_end_date"] = storage_distribution.get("end_date")
+    destinations = _mapping(distribution, "destinations")
+    sources = _mapping(distribution, "sources")
+    for public_name, source_name in (
+        ("storage_destination_total_energy_kwh", "total"),
+        ("storage_destination_building_energy_kwh", "building"),
+        ("storage_destination_grid_energy_kwh", "grid"),
+        ("storage_destination_unknown_energy_kwh", "unknown"),
+    ):
+        site[f"today_{public_name}"] = _storage_energy_kwh(destinations, source_name)
+    for public_name, source_name in (
+        ("storage_destination_building_pct", "buildingPercentage"),
+        ("storage_destination_grid_pct", "gridPercentage"),
+        ("storage_destination_unknown_pct", "unknownPercentage"),
+    ):
+        site[f"today_{public_name}"] = _component_number(destinations, source_name)
+    for public_name, source_name in (
+        ("storage_source_total_energy_kwh", "total"),
+        ("storage_source_pv_energy_kwh", "pv"),
+        ("storage_source_grid_energy_kwh", "grid"),
+        ("storage_source_unknown_energy_kwh", "unknown"),
+    ):
+        site[f"today_{public_name}"] = _storage_energy_kwh(sources, source_name)
+    for public_name, source_name in (
+        ("storage_source_pv_pct", "pvPercentage"),
+        ("storage_source_grid_pct", "gridPercentage"),
+        ("storage_source_unknown_pct", "unknownPercentage"),
+    ):
+        site[f"today_{public_name}"] = _component_number(sources, source_name)
+
+    site.update(
+        {
+            "battery_storage_state_power_w": _component_number(
+                battery_state, "current_power_w", "power_w"
+            ),
+            "battery_remaining_energy_kwh": _component_number(
+                battery_state, "remaining_energy_kwh"
+            ),
+            "battery_storage_state_of_charge_pct": _component_number(
+                battery_state, "state_of_charge_pct", "stateOfCharge"
+            ),
+            "battery_storage_status": _component_string(battery_state, "status"),
+            "battery_storage_timestamp": _component_string(
+                battery_state, "timestamp", "last_update_time"
+            ),
+            "today_battery_charge_energy_endpoint_kwh": _component_number(
+                battery_energy, "charge_energy_kwh"
+            ),
+            "today_battery_discharge_energy_endpoint_kwh": _component_number(
+                battery_energy, "discharge_energy_kwh"
+            ),
+        }
+    )
     clean_site = {key: value for key, value in site.items() if value is not None}
     observed_at = flow.get("last_update_time")
     if not isinstance(observed_at, str) or not observed_at:
         observed_at = datetime.now(UTC).isoformat()
     return {
         "connected": True,
-        "provider": "solaredge_monitoring_portal",
+        "provider": full["provider"],
         "observed_at": observed_at,
         "site": clean_site,
         "completeness": {key: value is not None for key, value in site.items()},
@@ -6491,6 +6878,26 @@ async def internal_solaredge_snapshot(request: Request) -> Response:
     return JSONResponse(snapshot)
 
 
+async def internal_solaredge_full_data(request: Request) -> Response:
+    """Return every bounded privacy-safe portal result for on-demand HA use."""
+    if not _solaredge_bridge_allowed(request) or solaredge_portal is None:
+        return JSONResponse({"error": "not_found"}, status_code=404)
+    try:
+        result = await _build_solaredge_bridge_full_data()
+    except SolarEdgePortalError:
+        LOGGER.warning("solaredge_portal_full_data_failed")
+        return JSONResponse(
+            {
+                "connected": False,
+                "provider": "solaredge_monitoring_portal",
+                "fetched_at": datetime.now(UTC).isoformat(),
+                "endpoint_status": {},
+            },
+            status_code=503,
+        )
+    return JSONResponse(result)
+
+
 transport_security = TransportSecuritySettings(
     allowed_hosts=[
         "127.0.0.1",
@@ -6547,6 +6954,11 @@ inner_app = Starlette(
         Route(
             "/internal/solaredge/snapshot",
             internal_solaredge_snapshot,
+            methods=["GET"],
+        ),
+        Route(
+            "/internal/solaredge/full-data",
+            internal_solaredge_full_data,
             methods=["GET"],
         ),
         Mount("/", app=mcp_app),

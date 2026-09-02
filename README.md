@@ -33,8 +33,9 @@ unrestricted service proxy.
   or sequence starts, confirmed logical-run pause/resume/current-zone skip,
   and idempotent stop operations.
 - **Energy and SolarEdge:** production, module comparison, power flow, energy
-  breakdowns, storage summaries, telemetry, alerts, and an optional Home
-  Assistant bridge integration.
+  breakdowns, storage summaries, telemetry, alerts, and a versioned Home
+  Assistant bridge with privacy-filtered scalar entities and durable export
+  event history.
 - **Persistent capability sync:** compares Home Assistant's current service
   registry with the reviewed release baseline every five minutes and reports
   drift without dynamically exposing new writes.
@@ -44,7 +45,7 @@ unrestricted service proxy.
 - **OAuth-native remote access:** authorization code flow with S256 PKCE,
   dynamic client registration, scoped access tokens, and MCP resource metadata.
 
-Version **2.7.8** currently advertises **110 tools**. See
+Version **2.7.9** currently advertises **110 tools**. See
 [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## Architecture

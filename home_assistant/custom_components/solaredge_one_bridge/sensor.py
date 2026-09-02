@@ -1,4 +1,4 @@
-"""Sensor platform for SolarEdge Monitoring Bridge."""
+"""Sensor platform for every scalar SolarEdge Monitoring bridge field."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
     SensorStateClass,
 )
-from homeassistant.const import PERCENTAGE, UnitOfEnergy, UnitOfPower
+from homeassistant.const import PERCENTAGE, UnitOfEnergy, UnitOfPower, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -19,6 +19,15 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from . import SolarEdgeBridgeConfigEntry
 from .const import DOMAIN
 from .coordinator import SolarEdgeBridgeCoordinator
+from .model import (
+    COUNT_KEYS,
+    ENERGY_KEYS,
+    METRIC_KEYS,
+    PERCENTAGE_KEYS,
+    POWER_KEYS,
+    RATIO_KEYS,
+    TEXT_KEYS,
+)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -26,7 +35,7 @@ class SolarEdgeBridgeSensorDescription(SensorEntityDescription):
     """Describe a sanitized bridge sensor."""
 
 
-SENSOR_DESCRIPTIONS: tuple[SolarEdgeBridgeSensorDescription, ...] = (
+CORE_SENSOR_DESCRIPTIONS: tuple[SolarEdgeBridgeSensorDescription, ...] = (
     *(
         SolarEdgeBridgeSensorDescription(
             key=key,
@@ -69,6 +78,81 @@ SENSOR_DESCRIPTIONS: tuple[SolarEdgeBridgeSensorDescription, ...] = (
         )
     ),
 )
+
+CORE_SENSOR_KEYS = frozenset(description.key for description in CORE_SENSOR_DESCRIPTIONS)
+
+
+def _friendly_name(key: str) -> str:
+    """Build a stable readable name for an explicitly allowlisted field."""
+    words = key.removesuffix("_kwh").removesuffix("_w").removesuffix("_pct").split("_")
+    replacements = {
+        "ac": "AC",
+        "dc": "DC",
+        "ev": "EV",
+        "pv": "PV",
+        "soc": "SOC",
+        "pct": "percentage",
+    }
+    label = " ".join(replacements.get(word, word) for word in words)
+    return f"{label[:1].upper()}{label[1:]}"
+
+
+def _additional_description(key: str) -> SolarEdgeBridgeSensorDescription:
+    """Describe one non-core scalar without dropping provider fields."""
+    common: dict = {"key": key, "name": _friendly_name(key)}
+    if key in POWER_KEYS:
+        common.update(
+            device_class=SensorDeviceClass.POWER,
+            native_unit_of_measurement=UnitOfPower.WATT,
+            state_class=SensorStateClass.MEASUREMENT,
+        )
+    elif key in ENERGY_KEYS:
+        state_class = None
+        if key in {
+            "production_energy_kwh",
+            "consumption_energy_kwh",
+            "grid_import_energy_kwh",
+            "grid_export_energy_kwh",
+            "battery_charge_energy_kwh",
+            "battery_discharge_energy_kwh",
+        } or key.startswith("lifetime_"):
+            state_class = SensorStateClass.TOTAL_INCREASING
+        elif key.startswith("today_"):
+            state_class = SensorStateClass.TOTAL
+        common.update(
+            device_class=SensorDeviceClass.ENERGY,
+            native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+            state_class=state_class,
+        )
+    elif key in PERCENTAGE_KEYS:
+        common.update(
+            native_unit_of_measurement=PERCENTAGE,
+            state_class=SensorStateClass.MEASUREMENT,
+        )
+        if key in {
+            "battery_state_of_energy_pct",
+            "battery_storage_state_of_charge_pct",
+            "ac_storage_charge_level_pct",
+            "dc_storage_charge_level_pct",
+        }:
+            common["device_class"] = SensorDeviceClass.BATTERY
+    elif key == "power_flow_refresh_rate_seconds":
+        common.update(
+            device_class=SensorDeviceClass.DURATION,
+            native_unit_of_measurement=UnitOfTime.SECONDS,
+            state_class=SensorStateClass.MEASUREMENT,
+        )
+    elif key in COUNT_KEYS or key in RATIO_KEYS:
+        common["state_class"] = SensorStateClass.MEASUREMENT
+    return SolarEdgeBridgeSensorDescription(**common)
+
+
+ADDITIONAL_SENSOR_DESCRIPTIONS = tuple(
+    _additional_description(key)
+    for key in sorted((METRIC_KEYS | TEXT_KEYS) - CORE_SENSOR_KEYS - {"storage_operating_plan"})
+)
+
+SENSOR_DESCRIPTIONS = (*CORE_SENSOR_DESCRIPTIONS, *ADDITIONAL_SENSOR_DESCRIPTIONS)
 
 
 async def async_setup_entry(
@@ -128,15 +212,22 @@ class SolarEdgeBridgeSensor(
         return (
             super().available
             and self.coordinator.data.connected
-            and self.coordinator.data.value(self.entity_description.key) is not None
+            and self._current_value() is not None
         )
 
     @property
-    def native_value(self) -> float | None:
+    def native_value(self) -> float | str | None:
         """Return the sanitized metric value, omitting unavailable values."""
         if not self.coordinator.data.connected:
             return None
-        return self.coordinator.data.value(self.entity_description.key)
+        return self._current_value()
+
+    def _current_value(self) -> float | str | None:
+        """Return the typed value for this allowlisted sensor description."""
+        key = self.entity_description.key
+        if key in TEXT_KEYS:
+            return self.coordinator.data.text(key)
+        return self.coordinator.data.value(key)
 
     @property
     def extra_state_attributes(self) -> dict[str, str | bool]:

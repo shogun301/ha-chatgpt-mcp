@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import ipaddress
+from collections.abc import Mapping
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 import aiohttp
 
@@ -55,14 +56,39 @@ class SolarEdgeBridgeClient:
     ) -> None:
         self._session = session
         self._endpoint = endpoint
+        parsed = urlsplit(endpoint)
+        full_data_path = (
+            f"{parsed.path.removesuffix('/snapshot')}/full-data"
+            if parsed.path.endswith("/snapshot")
+            else f"{parsed.path.rstrip('/')}/full-data"
+        )
+        self._full_data_endpoint = urlunsplit(
+            (parsed.scheme, parsed.netloc, full_data_path, "", "")
+        )
         self._shared_secret = shared_secret
         self._timeout = aiohttp.ClientTimeout(total=timeout_seconds)
 
     async def async_get_snapshot(self) -> SolarEdgeSnapshot:
         """Retrieve and validate one bridge snapshot."""
+        payload = await self._async_get_json(self._endpoint)
+
+        try:
+            return parse_snapshot(payload)
+        except InvalidSnapshot as err:
+            raise BridgeConnectionError("bridge returned an invalid snapshot") from err
+
+    async def async_get_full_data(self) -> dict[str, Any]:
+        """Retrieve the complete privacy-filtered portal payload on demand."""
+        payload = await self._async_get_json(self._full_data_endpoint)
+        if not isinstance(payload, Mapping):
+            raise BridgeConnectionError("bridge returned invalid full data")
+        return dict(payload)
+
+    async def _async_get_json(self, endpoint: str) -> Any:
+        """Retrieve one authenticated JSON response from the local bridge."""
         try:
             async with self._session.get(
-                self._endpoint,
+                endpoint,
                 headers={BRIDGE_SECRET_HEADER: self._shared_secret},
                 timeout=self._timeout,
             ) as response:
@@ -80,8 +106,4 @@ class SolarEdgeBridgeClient:
             raise
         except (TimeoutError, aiohttp.ClientError) as err:
             raise BridgeConnectionError("bridge request failed") from err
-
-        try:
-            return parse_snapshot(payload)
-        except InvalidSnapshot as err:
-            raise BridgeConnectionError("bridge returned an invalid snapshot") from err
+        return payload

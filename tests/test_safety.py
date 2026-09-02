@@ -55,6 +55,7 @@ from app.server import (
     HUBITAT_FAIL_CLOSED_SERVICES,
     SERVER_VERSION,
     ThermostatScheduleEntry,
+    _build_solaredge_bridge_full_data,
     _build_solaredge_bridge_snapshot,
     _build_thermostat_schedule,
     _build_sprinkler_telemetry,
@@ -94,7 +95,7 @@ class CloudToolSurfaceTests(unittest.TestCase):
     def test_server_advertises_expanded_typed_surface(self) -> None:
         tools = asyncio.run(mcp.list_tools())
         names = {tool.name for tool in tools}
-        self.assertEqual(mcp.version, "2.7.8")
+        self.assertEqual(mcp.version, "2.7.9")
         self.assertEqual(len(names), 110)
         self.assertTrue(
             {
@@ -230,6 +231,12 @@ class SolarEdgeBridgeSnapshotTests(unittest.TestCase):
                 },
             }
         )
+        portal.capabilities = AsyncMock(return_value={"has_storage": True})
+        portal.live_power = AsyncMock(return_value={"current_power_w": 7900.0})
+        portal.current_day_energy_summary = AsyncMock(return_value={})
+        portal.storage_distribution = AsyncMock(return_value={})
+        portal.battery_storage_state = AsyncMock(return_value={})
+        portal.battery_energy = AsyncMock(return_value={})
         lifetime = {
             "totals_kwh": {
                 "production": 41869.308,
@@ -263,7 +270,52 @@ class SolarEdgeBridgeSnapshotTests(unittest.TestCase):
         self.assertEqual(result["site"]["storage_operating_plan_block_count"], 4)
         self.assertEqual(result["site"]["grid_import_energy_kwh"], 20046.732)
         self.assertEqual(result["site"]["battery_charge_energy_kwh"], 6679.9085)
-        self.assertTrue(all(result["completeness"].values()))
+        self.assertTrue(result["completeness"]["production_power_w"])
+        self.assertTrue(result["site"]["endpoint_power_flow_available"])
+        self.assertTrue(result["site"]["endpoint_lifetime_energy_available"])
+
+    def test_full_data_collects_only_named_privacy_filtered_surfaces(self) -> None:
+        portal = MagicMock()
+        portal.capabilities = AsyncMock(return_value={"has_storage": True})
+        portal.live_power = AsyncMock(return_value={"current_power_w": 1000.0})
+        portal.live_power_flow = AsyncMock(return_value={"components": {}})
+        portal.current_day_energy_summary = AsyncMock(
+            return_value={"totals_kwh": {"production": 8.0}}
+        )
+        portal.storage_distribution = AsyncMock(return_value={"distribution": {}})
+        portal.battery_storage_state = AsyncMock(return_value={"status": "IDLE"})
+        portal.battery_energy = AsyncMock(return_value={"charge_energy_kwh": 2.0})
+        lifetime = {"totals_kwh": {"production": 100.0}}
+
+        with (
+            patch("app.server.solaredge_portal", portal),
+            patch(
+                "app.server._solaredge_lifetime_energy",
+                new=AsyncMock(return_value=lifetime),
+            ),
+        ):
+            result = asyncio.run(_build_solaredge_bridge_full_data())
+
+        self.assertEqual(result["provider"], "solaredge_monitoring_portal")
+        self.assertEqual(result["lifetime_energy"], lifetime)
+        self.assertTrue(all(result["endpoint_status"].values()))
+        self.assertEqual(
+            set(result),
+            {
+                "connected",
+                "provider",
+                "fetched_at",
+                "endpoint_status",
+                "capabilities",
+                "live_power",
+                "power_flow",
+                "current_day_energy",
+                "lifetime_energy",
+                "current_day_storage_distribution",
+                "battery_storage_state",
+                "current_day_battery_energy",
+            },
+        )
 
 
 class SolarEdgeFocusedReadTests(unittest.TestCase):

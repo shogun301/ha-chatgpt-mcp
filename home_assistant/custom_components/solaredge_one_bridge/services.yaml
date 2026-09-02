@@ -1,0 +1,5 @@
+get_full_data:
+  name: Get full SolarEdge data
+  description: >-
+    Returns every privacy-filtered capability, live-flow, energy, storage,
+    battery, distribution, and chart field currently exposed by the local bridge.

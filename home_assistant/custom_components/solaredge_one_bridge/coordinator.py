@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -32,6 +33,10 @@ class SolarEdgeBridgeCoordinator(DataUpdateCoordinator[SolarEdgeSnapshot]):
             update_interval=DEFAULT_UPDATE_INTERVAL,
         )
         self._client = client
+
+    async def async_get_full_data(self) -> dict[str, Any]:
+        """Return every privacy-filtered portal surface without recorder storage."""
+        return await self._client.async_get_full_data()
 
     async def _async_update_data(self) -> SolarEdgeSnapshot:
         try:

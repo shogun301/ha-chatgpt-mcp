@@ -178,7 +178,7 @@ def verify_manifests() -> list[str]:
     expected_data = {
         "collector": {"README.md", "ha-host-diagnostics.service"},
         "home_assistant.custom_components.solaredge_one_bridge": {
-            "manifest.json", "strings.json", "translations/*.json",
+            "manifest.json", "services.yaml", "strings.json", "translations/*.json",
         },
         "home_assistant.wyzeapi_overlay": {"README.md", "UPSTREAM_LICENSE", "NOTICE"},
         "home_assistant.wyzeapi_overlay.custom_components.wyzeapi": {

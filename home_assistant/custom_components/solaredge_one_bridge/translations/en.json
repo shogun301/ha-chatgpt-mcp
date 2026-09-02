@@ -36,5 +36,11 @@
       "production_power_w": {"name": "Production power"},
       "storage_operating_plan": {"name": "Storage operating plan"}
     }
+  },
+  "services": {
+    "get_full_data": {
+      "name": "Get full SolarEdge data",
+      "description": "Return every privacy-filtered capability, live-flow, energy, storage, battery, distribution, and chart field currently exposed by the local bridge."
+    }
   }
 }

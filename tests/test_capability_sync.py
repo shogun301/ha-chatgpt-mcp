@@ -70,7 +70,7 @@ class CapabilitySyncTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(drift["status"], "drift_detected")
             self.assertEqual(drift["drift"]["added"], ["wyzeapi.skip_sprinkler_zone"])
 
-            new_release = CapabilitySync(state_path, "2.7.8", interval_seconds=60)
+            new_release = CapabilitySync(state_path, "2.7.9", interval_seconds=60)
             acknowledged = await new_release.refresh(ha)
             self.assertEqual(acknowledged["status"], "in_sync")
             self.assertFalse(any(acknowledged["drift"].values()))

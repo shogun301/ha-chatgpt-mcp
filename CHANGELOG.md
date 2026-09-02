@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.7.9 - 2026-09-02
+
+- Reconcile the live SolarEdge Monitoring Bridge 1.3.1 into maintained source, including the privacy-filtered full-data response service, expanded scalar sensors, capability/connectivity binary sensors, and durable export-with-battery-headroom event history.
+- Add authenticated WebSocket event reads and CSV export backed by the same persisted event values, with bounded restart reconstruction and deterministic qualification/end semantics.
+- Keep the new Home Assistant response service out of generic MCP service routing; existing narrow typed SolarEdge MCP tools remain the preferred client surface.
+- Add focused parser, full-data client, event-state-machine, CSV, and idempotent reconstruction regression coverage and acknowledge the removed optional Jewish Calendar service in the release capability baseline.
+
 ## 2.7.8 - 2026-09-01
 
 - Add typed, destructive, non-idempotent `pause_sprinklers`, `resume_sprinklers`, and `skip_sprinkler_zone` tools, each gated by explicit current-turn confirmation and restricted to the configured controller.

@@ -183,13 +183,39 @@ class SolarEdgePortalClient:
             "site capabilities", f"/site-details/{self.config.site_id}/components"
         )
         safe = _sanitize(payload)
-        return {
-            "has_production": _find_bool(safe, "hasProduction"),
-            "has_consumption_and_grid": _find_bool(safe, "hasConsumptionAndGrid"),
-            "has_storage": _find_bool(safe, "hasStorage"),
-            "has_ac_storage": _find_bool(safe, "hasAcStorage"),
-            "has_dc_storage": _find_bool(safe, "hasDcStorage"),
-        }
+        result: dict[str, Any] = {}
+        for public_name, provider_name in (
+            ("has_production", "hasProduction"),
+            ("has_consumption_and_grid", "hasConsumptionAndGrid"),
+            ("has_storage", "hasStorage"),
+            ("has_performance_ratio", "hasPerformanceRatio"),
+            ("has_smart_devices", "hasSmartDevices"),
+            ("has_ev_chargers", "hasEVChargers"),
+            ("has_billing_cycle_program", "hasBillingCycleProgram"),
+            ("show_inverter_graph", "showInverterGraph"),
+            ("can_normalize_data", "canNormalizeData"),
+            ("can_normalize_inverters_data", "canNormalizeInvertersData"),
+            ("can_edit_billing_period", "canEditBillingPeriod"),
+            ("has_commercial_performance_ratio", "hasCommercialPerformanceRatio"),
+            ("has_generator", "hasGenerator"),
+            ("has_ac_storage", "hasAcStorage"),
+            ("has_dc_storage", "hasDcStorage"),
+        ):
+            value = _find_optional_bool(safe, provider_name)
+            if value is not None:
+                result[public_name] = value
+        for public_name, provider_name in (
+            ("viewer_type", "viewerType"),
+            ("site_type", "siteType"),
+            ("international_system_units", "internationalSystemUnits"),
+        ):
+            value = _find_text(safe, provider_name)
+            if value is not None:
+                result[public_name] = value
+        inverter_count = _find_number(safe, "inverterCount")
+        if inverter_count is not None and inverter_count >= 0:
+            result["inverter_count"] = int(inverter_count)
+        return result
 
     async def live_power(self) -> dict[str, Any]:
         payload = await self._dashboard_get(
@@ -204,7 +230,7 @@ class SolarEdgePortalClient:
         )
         normalized = _normalize_power_payload(payload)
         storage_operating_plan = _storage_operating_plan_summary(normalized)
-        return {
+        result = {
             "components": {
                 public_name: _component(normalized, provider_name)
                 for public_name, provider_name in (
@@ -220,6 +246,20 @@ class SolarEdgePortalClient:
             "last_update_time": _latest_timestamp(normalized),
             "storage_operating_plan": storage_operating_plan,
         }
+        for public_name, provider_name in (
+            ("is_real_time", "isRealTime"),
+            ("is_communicating", "isCommunicating"),
+        ):
+            value = _find_optional_bool(normalized, provider_name)
+            if value is not None:
+                result[public_name] = value
+        refresh_rate = _find_number(normalized, "updateRefreshRate")
+        if refresh_rate is not None and refresh_rate >= 0:
+            result["update_refresh_rate_seconds"] = refresh_rate
+        producers = _find_key(normalized, "energyProducers")
+        if isinstance(producers, list):
+            result["energy_producer_count"] = len(producers)
+        return result
 
     async def completed_energy_summary(
         self, days: int = 7, *, as_of: date | None = None
@@ -290,6 +330,37 @@ class SolarEdgePortalClient:
             "energy history", f"/energy/sites/{self.config.site_id}", params
         )
         normalized = _normalize_energy_payload(payload)
+        raw_summary = _find_key(normalized, "summary")
+        summary = raw_summary if isinstance(raw_summary, Mapping) else normalized
+        summary_metrics: dict[str, Any] = {}
+        for public_name, provider_name in (
+            ("performance_ratio_pct", "performanceRatio"),
+            ("average_power_factor", "averagePowerFactor"),
+            ("self_consumption_ratio_pct", "selfConsumptionRatio"),
+            ("self_sufficiency_ratio_pct", "selfSufficiencyRatio"),
+            ("site_availability_pct", "siteAvailability"),
+            ("yield", "yield"),
+        ):
+            value = _find_number(summary, provider_name)
+            if value is not None:
+                summary_metrics[public_name] = value
+        for public_name, provider_name in (
+            ("late_production_start_date", "lateProductionStartDate"),
+            (
+                "late_production_distribution_start_date",
+                "lateProductionDistributionStartDate",
+            ),
+            ("late_consumption_start_date", "lateConsumptionStartDate"),
+            (
+                "late_consumption_distribution_start_date",
+                "lateConsumptionDistributionStartDate",
+            ),
+            ("late_performance_ratio_start_date", "latePerformanceRatioStartDate"),
+            ("late_yield_start_date", "lateYieldStartDate"),
+        ):
+            value = _find_text(summary, provider_name)
+            if value is not None:
+                summary_metrics[public_name] = value
         return {
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
@@ -303,6 +374,7 @@ class SolarEdgePortalClient:
             "consumption_distribution": _find_key(
                 normalized, "consumptionDistribution"
             ),
+            "summary_metrics": summary_metrics,
             "chart": _find_key(normalized, "chart"),
             "provider_timestamp": _latest_timestamp(normalized),
         }
@@ -742,6 +814,7 @@ def _unit_for_key(key: str, inherited: str | None) -> str | None:
             "date",
             "percent",
             "ratio",
+            "factor",
             "level",
             "soc",
             "count",
@@ -783,7 +856,7 @@ def _component(payload: Mapping[str, Any], provider_name: str) -> dict[str, Any]
     value = _find_key(payload, provider_name)
     if not isinstance(value, Mapping):
         return None
-    return {
+    result = {
         key: item
         for key, item in value.items()
         if _normalized_key(key)
@@ -796,8 +869,33 @@ def _component(payload: Mapping[str, Any], provider_name: str) -> dict[str, Any]
             "stateofcharge",
             "lastupdatetime",
             "timestamp",
+            "isactive",
+            "isconsuming",
+            "isproducing",
+            "blockcount",
+            "storageplan",
         }
     }
+    for public_name, wanted in (
+        ("charge_level_pct", "chargeLevel"),
+        ("state_of_charge_pct", "stateOfCharge"),
+        ("block_count", "blockCount"),
+    ):
+        number = _find_number(value, wanted)
+        if number is not None:
+            result[public_name] = number
+    for public_name, wanted in (
+        ("is_active", "isActive"),
+        ("is_consuming", "isConsuming"),
+        ("is_producing", "isProducing"),
+    ):
+        boolean = _find_optional_bool(value, wanted)
+        if boolean is not None:
+            result[public_name] = boolean
+    storage_plan = _find_text(value, "storagePlan")
+    if storage_plan is not None:
+        result["storage_plan"] = storage_plan
+    return result
 
 
 def _storage_operating_plan_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -897,6 +995,25 @@ def _find_number(value: Any, wanted: str) -> float | None:
 def _find_bool(value: Any, wanted: str) -> bool:
     result = _find_key(value, wanted)
     return bool(result) if isinstance(result, bool) else False
+
+
+def _find_optional_bool(value: Any, wanted: str) -> bool | None:
+    """Return a provider boolean without converting missing data to false."""
+    result = _find_key(value, wanted)
+    return result if isinstance(result, bool) else None
+
+
+def _find_text(value: Any, wanted: str) -> str | None:
+    """Return one bounded single-line provider string."""
+    result = _find_key(value, wanted)
+    if not isinstance(result, str):
+        return None
+    normalized = result.strip()
+    if not normalized or len(normalized) > 128 or any(
+        character in normalized for character in "\r\n\0"
+    ):
+        return None
+    return normalized
 
 
 def _latest_timestamp(value: Any) -> str | None:

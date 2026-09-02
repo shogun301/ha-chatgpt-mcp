@@ -65,6 +65,9 @@ def test_parser_allowlists_metrics_and_never_propagates_sensitive_fields() -> No
         "production_power_w": 8123.0,
         "grid_import_energy_kwh": 42.5,
         "battery_state_of_energy_pct": 61.0,
+        "storage_operating_plan": "Time of Use",
+        "storage_operating_plan_active": True,
+        "storage_operating_plan_block_count": 4.0,
     }
     assert snapshot.completeness == {
         "production_power_w": True,
@@ -159,6 +162,32 @@ def test_client_sends_only_bridge_secret_header_and_uses_strict_timeout() -> Non
     assert kwargs["timeout"].total == const.DEFAULT_TIMEOUT_SECONDS
 
 
+def test_client_uses_bounded_full_data_endpoint_and_requires_an_object() -> None:
+    session = _FakeSession(_FakeResponse(200, {"capability_inverter_count": 1}))
+    client = client_module.SolarEdgeBridgeClient(
+        session, "http://127.0.0.1:8000/internal/solaredge/snapshot", "test-secret"
+    )
+
+    payload = asyncio.run(client.async_get_full_data())
+
+    assert payload == {"capability_inverter_count": 1}
+    endpoint, kwargs = session.calls[0]
+    assert endpoint == "http://127.0.0.1:8000/internal/solaredge/full-data"
+    assert kwargs["headers"] == {const.BRIDGE_SECRET_HEADER: "test-secret"}
+
+    invalid = client_module.SolarEdgeBridgeClient(
+        _FakeSession(_FakeResponse(200, [])),
+        "http://127.0.0.1:8000/internal/solaredge/snapshot",
+        "test-secret",
+    )
+    try:
+        asyncio.run(invalid.async_get_full_data())
+    except client_module.BridgeConnectionError:
+        pass
+    else:
+        raise AssertionError("non-object full data was accepted")
+
+
 def test_client_classifies_authentication_failure() -> None:
     session = _FakeSession(_FakeResponse(401, {}))
     client = client_module.SolarEdgeBridgeClient(
@@ -220,13 +249,39 @@ def test_polling_interval_is_five_minutes() -> None:
     assert const.DEFAULT_UPDATE_INTERVAL.total_seconds() == 300
 
 
-def test_snapshot_contract_contains_exactly_thirteen_metrics() -> None:
-    assert len(model.POWER_KEYS) == 6
-    assert len(model.ENERGY_KEYS) == 6
-    assert len(model.PERCENTAGE_KEYS) == 1
-    assert len(model.METRIC_KEYS) == 13
+def test_snapshot_contract_contains_only_the_reviewed_scalar_fields() -> None:
+    assert len(model.POWER_KEYS) == 15
+    assert len(model.ENERGY_KEYS) == 50
+    assert len(model.PERCENTAGE_KEYS) == 32
+    assert len(model.COUNT_KEYS) == 8
+    assert len(model.RATIO_KEYS) == 4
+    assert len(model.TEXT_KEYS) == 50
+    assert len(model.BOOLEAN_KEYS) == 36
+    assert len(model.METRIC_KEYS) == 109
     assert len(model.STORAGE_STATUS_KEYS) == 3
-    assert len(model.SNAPSHOT_KEYS) == 16
+    assert len(model.SNAPSHOT_KEYS) == 195
+
+
+def test_parser_preserves_reviewed_text_flags_and_integer_counts() -> None:
+    snapshot = model.parse_snapshot(
+        {
+            "connected": True,
+            "observed_at": "2026-09-02T10:00:00Z",
+            "site": {
+                "capability_viewer_type": "Owner",
+                "endpoint_power_flow_available": False,
+                "capability_inverter_count": 2,
+                "power_flow_refresh_rate_seconds": 300.5,
+                "bridge_fetched_at": "value\nthat-must-not-survive",
+            },
+        }
+    )
+
+    assert snapshot.text("capability_viewer_type") == "Owner"
+    assert snapshot.flag("endpoint_power_flow_available") is False
+    assert snapshot.value("capability_inverter_count") == 2.0
+    assert snapshot.value("power_flow_refresh_rate_seconds") is None
+    assert snapshot.text("bridge_fetched_at") is None
 
 
 def test_sensor_platform_preserves_metrics_and_adds_one_plan_status_entity() -> None:
