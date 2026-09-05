@@ -23,6 +23,7 @@ EVENT_SCHEMA_VERSION: Final = 2
 GRID_EXPORT_THRESHOLD_W: Final = 500.0
 CANDIDATE_SOC_THRESHOLD_PCT: Final = 100.0
 ALERT_SOC_THRESHOLD_PCT: Final = 99.5
+EXPORT_WITH_HEADROOM_SOC_THRESHOLD_PCT: Final = 95.0
 BATTERY_DISCHARGE_THRESHOLD_W: Final = 250.0
 BATTERY_CHARGE_HEADROOM_THRESHOLD_W: Final = 8500.0
 BATTERY_TO_GRID_DURATION_SECONDS: Final = 5 * 60
@@ -197,7 +198,7 @@ def _export_with_headroom_at_deadline(sample: ExportSample) -> bool:
         and sample.soc_pct is not None
         and sample.battery_charge_power_w is not None
         and sample.grid_export_power_w > GRID_EXPORT_THRESHOLD_W
-        and sample.soc_pct < ALERT_SOC_THRESHOLD_PCT
+        and sample.soc_pct < EXPORT_WITH_HEADROOM_SOC_THRESHOLD_PCT
         and sample.battery_charge_power_w < BATTERY_CHARGE_HEADROOM_THRESHOLD_W
     )
 
@@ -215,6 +216,7 @@ def _thresholds() -> dict[str, float | int]:
         "grid_export_w": GRID_EXPORT_THRESHOLD_W,
         "candidate_soc_pct": CANDIDATE_SOC_THRESHOLD_PCT,
         "alert_soc_pct": ALERT_SOC_THRESHOLD_PCT,
+        "export_with_headroom_soc_pct": EXPORT_WITH_HEADROOM_SOC_THRESHOLD_PCT,
         "battery_discharge_w": BATTERY_DISCHARGE_THRESHOLD_W,
         "battery_charge_headroom_w": BATTERY_CHARGE_HEADROOM_THRESHOLD_W,
         "battery_to_grid_duration_seconds": BATTERY_TO_GRID_DURATION_SECONDS,

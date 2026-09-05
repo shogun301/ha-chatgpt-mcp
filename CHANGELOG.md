@@ -5,6 +5,7 @@
 - Accept Claude clients at the OAuth authorization server: HTTPS callbacks on `claude.ai` and `claude.com` join the existing ChatGPT/OpenAI hosts, RFC 8252 loopback redirects (`http://localhost`, `127.0.0.1`, `::1`, any port) are accepted for native clients such as Claude Code, and `claude.ai`/`claude.com` client ID metadata documents are recognized.
 - Reject redirect URIs carrying fragments, keep non-loopback `http` and unknown hosts fail-closed, and make the authorization page wording client-neutral.
 - No MCP tool, schema, or authorization-scope change; the 110-tool registry contract is carried forward unchanged.
+- Reconcile the live SolarEdge bridge into source: export-with-headroom qualification now uses a dedicated 95% state-of-charge threshold (`export_with_headroom_soc_pct`) instead of the 99.5% alert threshold, matching the bridge deployed on 2026-09-04.
 
 ## 2.7.9 - 2026-09-02
 

@@ -26,7 +26,8 @@ def _sample(
     at: datetime,
     *,
     export_w: float | None = 1_000,
-    soc_pct: float | None = 99,
+    # Below every state-of-charge threshold, including the 95% export-with-headroom bound.
+    soc_pct: float | None = 94,
     charge_w: float | None = 0,
     discharge_w: float | None = 300,
     export_kwh: float | None = None,
