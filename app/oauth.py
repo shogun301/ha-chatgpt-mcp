@@ -47,20 +47,33 @@ def _hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+# Hosted MCP clients whose HTTPS callbacks may receive authorization codes: ChatGPT/Codex
+# (chatgpt.com, openai.com) and Claude (claude.ai, claude.com). Subdomains are included.
+OFFICIAL_REDIRECT_DOMAINS = ("chatgpt.com", "openai.com", "claude.ai", "claude.com")
+# Native clients such as Claude Code register an RFC 8252 loopback redirect
+# (http://localhost:<ephemeral port>/callback). Any port is accepted, as the RFC requires.
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+# Client ID metadata document hosts (exact match) that may skip dynamic registration.
+OFFICIAL_CIMD_HOSTS = frozenset({"chatgpt.com", "claude.ai", "claude.com"})
+
+
+def _host_in_domains(host: str, domains: tuple[str, ...]) -> bool:
+    return any(host == domain or host.endswith("." + domain) for domain in domains)
+
+
 def _official_redirect(uri: str) -> bool:
     try:
         parsed = urlparse(uri)
     except ValueError:
         return False
     host = (parsed.hostname or "").lower()
-    if parsed.scheme != "https" or not host:
+    if not host or parsed.fragment:
         return False
-    return (
-        host == "chatgpt.com"
-        or host.endswith(".chatgpt.com")
-        or host == "openai.com"
-        or host.endswith(".openai.com")
-    )
+    if parsed.scheme == "https":
+        return _host_in_domains(host, OFFICIAL_REDIRECT_DOMAINS)
+    if parsed.scheme == "http":
+        return host in LOOPBACK_HOSTS
+    return False
 
 
 def _official_cimd(client_id: str) -> bool:
@@ -69,9 +82,11 @@ def _official_cimd(client_id: str) -> bool:
     except ValueError:
         return False
     host = (parsed.hostname or "").lower()
-    return parsed.scheme == "https" and host == "chatgpt.com" and parsed.path.startswith(
-        "/oauth/"
-    )
+    if parsed.scheme != "https" or host not in OFFICIAL_CIMD_HOSTS:
+        return False
+    if host == "chatgpt.com":
+        return parsed.path.startswith("/oauth/")
+    return parsed.path.startswith("/") and len(parsed.path) > 1
 
 
 class OAuthStore:
@@ -192,7 +207,7 @@ class OAuthServer:
         if auth_method != "none":
             return _oauth_error("invalid_client_metadata", status=400)
         client_id = _token(32)
-        client_name = str(payload.get("client_name") or "ChatGPT")[:120]
+        client_name = str(payload.get("client_name") or "MCP client")[:120]
         with self.store.connect() as db:
             db.execute(
                 "INSERT INTO clients(client_id,client_name,redirect_uris,created_at) VALUES(?,?,?,?)",
@@ -263,8 +278,8 @@ class OAuthServer:
 <form method="post" action="/oauth/authorize/decision">
 <input type="hidden" name="transaction_id" value="{html.escape(transaction_id)}">
 <label>Connection password<input name="password" type="password" autocomplete="current-password" required autofocus></label>
-<button type="submit">Authorize ChatGPT Work</button></form>
-<p class="note">The password is verified here and is never sent to ChatGPT or Home Assistant.</p></body></html>"""
+<button type="submit">Authorize this client</button></form>
+<p class="note">The password is verified here and is never sent to the client or to Home Assistant.</p></body></html>"""
         return HTMLResponse(page, headers={"Cache-Control": "no-store"})
 
     async def authorize_decision(self, request: Request) -> Response:
