@@ -45,7 +45,7 @@ unrestricted service proxy.
 - **OAuth-native remote access:** authorization code flow with S256 PKCE,
   dynamic client registration, scoped access tokens, and MCP resource metadata.
 
-Version **2.7.9** currently advertises **110 tools**. See
+Version **2.7.10** currently advertises **110 tools**. See
 [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## Architecture

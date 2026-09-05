@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.7.10 - 2026-09-04
+
+- Accept Claude clients at the OAuth authorization server: HTTPS callbacks on `claude.ai` and `claude.com` join the existing ChatGPT/OpenAI hosts, RFC 8252 loopback redirects (`http://localhost`, `127.0.0.1`, `::1`, any port) are accepted for native clients such as Claude Code, and `claude.ai`/`claude.com` client ID metadata documents are recognized.
+- Reject redirect URIs carrying fragments, keep non-loopback `http` and unknown hosts fail-closed, and make the authorization page wording client-neutral.
+- No MCP tool, schema, or authorization-scope change; the 110-tool registry contract is carried forward unchanged.
+
 ## 2.7.9 - 2026-09-02
 
 - Reconcile the live SolarEdge Monitoring Bridge 1.3.1 into maintained source, including the privacy-filtered full-data response service, expanded scalar sensors, capability/connectivity binary sensors, and durable export-with-battery-headroom event history.
