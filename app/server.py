@@ -32,6 +32,7 @@ from starlette.routing import Mount, Route
 from . import config
 from .audit import AuditLog
 from .capability_sync import CapabilitySync
+from .custom_cards import CustomCardResources, MAX_SOURCE_BYTES
 from .diagnostics import (
     COMPONENTS as DIAGNOSTIC_COMPONENTS,
     SEVERITIES as DIAGNOSTIC_SEVERITIES,
@@ -104,7 +105,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 LOGGER = logging.getLogger("ha_chatgpt_mcp")
-SERVER_VERSION = "2.7.10"
+SERVER_VERSION = "2.7.11"
 audit = AuditLog(config.AUDIT_LOG_PATH)
 oauth = OAuthServer(
     OAuthStore(config.DATABASE_PATH),
@@ -120,6 +121,7 @@ ha = HomeAssistantClient(
     config.BACKUP_PATH,
 )
 diagnostics = DiagnosticsReader(config.HOST_DIAGNOSTICS_PATH)
+custom_cards = CustomCardResources(ha, config.DATABASE_PATH.parent / 'custom-card-resources.json', config.BACKUP_PATH)
 lan_diagnostics = LanDiagnostics()
 capability_sync = CapabilitySync(config.CAPABILITY_SYNC_PATH, SERVER_VERSION)
 
@@ -499,7 +501,14 @@ class RedactingMCPServer(MCPServer):
         raw_result = await self._tool_manager.call_tool(
             name, arguments, context, convert_result=False
         )
-        raw_result = _sanitize_tool_result(raw_result)
+        if name == 'read_custom_card_resource' and isinstance(raw_result, dict):
+            # The generic URL redactor treats JavaScript '?' as a query string.
+            # Only this allowlisted source tool carries exact decoded source bytes.
+            source = raw_result.pop('source')
+            raw_result = _sanitize_tool_result(raw_result)
+            raw_result['source'] = source
+        else:
+            raw_result = _sanitize_tool_result(raw_result)
         tool = self._tool_manager.get_tool(name)
         if tool is None:
             raise ValueError(f"Unknown tool: {name}")
@@ -2539,6 +2548,62 @@ async def create_home_assistant_backup(confirmed: bool = False) -> dict[str, Any
     )
     _audit_tool("create_home_assistant_backup")
     return {"status": "accepted", "result": result}
+
+
+def _require_resource_read() -> None:
+    if 'mcp:read' not in str((claims_context.get() or {}).get('scope', '')).split():
+        raise PermissionError('This connection is not authorized for resource reads')
+
+
+ResourceKey = Annotated[str, Field(pattern=r'^[a-z][a-z0-9-]{0,63}$')]
+ResourceSource = Annotated[str, Field(min_length=1, max_length=MAX_SOURCE_BYTES)]
+SourceSha256 = Annotated[str, Field(pattern=r'^[0-9a-f]{64}$')]
+BackupId = Annotated[str, Field(pattern=r'^[0-9a-f]{32}$')]
+
+
+@mcp.tool(title='Discover approved custom-card resources', annotations=READ)
+async def discover_custom_card_resources() -> dict[str, Any]:
+    """Discover only deployment-approved embedded modules and their registered elements."""
+    _require_resource_read()
+    result = await custom_cards.discover()
+    _audit_tool('discover_custom_card_resources', count=result['count'])
+    return result
+
+
+@mcp.tool(title='Read approved custom-card source', annotations=READ)
+async def read_custom_card_resource(resource_key: ResourceKey) -> dict[str, Any]:
+    """Read decoded JavaScript and its SHA-256 for one approved resource key."""
+    _require_resource_read()
+    result = await custom_cards.read(resource_key)
+    _audit_tool('read_custom_card_resource', resource_key=resource_key, source_sha256=result['source_sha256'])
+    return result
+
+
+@mcp.tool(title='Validate approved custom-card source', annotations=READ)
+async def validate_custom_card_resource(resource_key: ResourceKey, source: ResourceSource) -> dict[str, Any]:
+    """Parse proposed JavaScript without executing it; check required element registrations."""
+    _require_resource_read()
+    return await custom_cards.validate(resource_key, source)
+
+
+@mcp.tool(title='Update approved custom-card source', annotations=WRITE)
+async def update_custom_card_resource(resource_key: ResourceKey, source: ResourceSource, expected_sha256: SourceSha256) -> dict[str, Any]:
+    """Hash-guard one approved module; validate, back up, publish, verify and roll back on failure."""
+    _require_resource_read()
+    _require_write()
+    result = await custom_cards.update(resource_key, source, expected_sha256)
+    _audit_tool('update_custom_card_resource', resource_key=resource_key, publication_status=result['publication_status'], rollback_status=result['rollback_status'], backup_id=result['backup_id'])
+    return result
+
+
+@mcp.tool(title='Restore retained custom-card backup', annotations=WRITE)
+async def restore_custom_card_resource(resource_key: ResourceKey, backup_id: BackupId, expected_sha256: SourceSha256) -> dict[str, Any]:
+    """Restore one retained backup to its approved resource with current-hash validation."""
+    _require_resource_read()
+    _require_write()
+    result = await custom_cards.restore(resource_key, backup_id, expected_sha256)
+    _audit_tool('restore_custom_card_resource', resource_key=resource_key, publication_status=result['publication_status'], rollback_status=result['rollback_status'], backup_id=result['backup_id'])
+    return result
 
 
 @mcp.tool(title="List Home Assistant dashboards", annotations=READ)
@@ -6658,7 +6723,7 @@ class SecurityMiddleware:
             await _send_json(send, 429, {"error": "rate_limited"})
             return
         token_handle = None
-        if path == "/mcp":
+        if path == "/mcp" or path.startswith("/mcp/"):
             authorization = (headers.get(b"authorization") or b"").decode(
                 "utf-8", "replace"
             )
@@ -6683,6 +6748,10 @@ class SecurityMiddleware:
                     {"error": "invalid_token"},
                     [(b"www-authenticate", b'Bearer error="invalid_token"')],
                 )
+                return
+            if 'mcp:read' not in str(claims.get('scope', '')).split():
+                await _send_json(send, 403, {'error': 'insufficient_scope'},
+                                 [(b'www-authenticate', b'Bearer error="insufficient_scope", scope="mcp:read"')])
                 return
             token_handle = claims_context.set(claims)
         status_holder = {"status": 500}

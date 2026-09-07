@@ -38,10 +38,15 @@ DIAGNOSTIC_TOOLS = (
     "probe_lan_node",
 )
 LAN_PROBE_SERVICES = ("dns", "router_ssh")
-EXPECTED_VERSION = "2.7.10"
-EXPECTED_TOOL_COUNT = 110
-CONTRACT_PATH = Path("/app/tests/fixtures/server-contract-2.7.10.json")
+EXPECTED_VERSION = "2.7.11"
+EXPECTED_TOOL_COUNT = 115
+CONTRACT_PATH = Path("/app/tests/fixtures/server-contract-2.7.11.json")
 NEW_CAPABILITY_TOOLS = {
+    "discover_custom_card_resources",
+    "read_custom_card_resource",
+    "validate_custom_card_resource",
+    "update_custom_card_resource",
+    "restore_custom_card_resource",
     "get_capability_sync_status",
     "get_calendar_events",
     "create_calendar_event",

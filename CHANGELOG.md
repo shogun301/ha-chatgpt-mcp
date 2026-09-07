@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.7.11 - 2026-09-07
+
+- Add five typed tools for administrator-approved embedded custom-card resources, with exact source reads, parsing, required registrations, optimistic hash guards, durable backups, verified publication and rollback.
+- Enforce read scope on every MCP HTTP request, including paths beneath `/mcp/`; retain write-scope enforcement and legitimate password-gated OAuth clients.
+- Add isolated access-control and transactional resource tests. The registry now advertises 115 tools.
+
 ## 2.7.10 - 2026-09-04
 
 - Accept Claude clients at the OAuth authorization server: HTTPS callbacks on `claude.ai` and `claude.com` join the existing ChatGPT/OpenAI hosts, RFC 8252 loopback redirects (`http://localhost`, `127.0.0.1`, `::1`, any port) are accepted for native clients such as Claude Code, and `claude.ai`/`claude.com` client ID metadata documents are recognized.

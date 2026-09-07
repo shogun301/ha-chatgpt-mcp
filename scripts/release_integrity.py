@@ -176,6 +176,7 @@ def verify_manifests() -> list[str]:
         raise AssertionError("Python package discovery exclude set is not fail-closed")
     package_data = project.get("tool", {}).get("setuptools", {}).get("package-data", {})
     expected_data = {
+        "app": {"*.cjs", "vendor/*.cjs", "vendor/ACORN-LICENSE"},
         "collector": {"README.md", "ha-host-diagnostics.service"},
         "home_assistant.custom_components.solaredge_one_bridge": {
             "manifest.json", "services.yaml", "strings.json", "translations/*.json",
