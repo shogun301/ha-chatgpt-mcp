@@ -30,6 +30,8 @@ from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 
 from . import config
+from . import sprinkler_schedule as watering
+from .sprinkler_schedule import ZonePatch
 from .audit import AuditLog
 from .capability_sync import CapabilitySync
 from .custom_cards import CustomCardResources, MAX_SOURCE_BYTES
@@ -105,7 +107,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 LOGGER = logging.getLogger("ha_chatgpt_mcp")
-SERVER_VERSION = "2.7.11"
+SERVER_VERSION = "2.7.12"
 audit = AuditLog(config.AUDIT_LOG_PATH)
 oauth = OAuthServer(
     OAuthStore(config.DATABASE_PATH),
@@ -571,7 +573,14 @@ mcp = RedactingMCPServer(
         "controls, administration, shell commands, shutdown, credentials, or broad or ambiguous "
         "changes. For home-LAN discovery or reachability, use the fixed read-only LAN tools; "
         "they accept only node IDs inside the configured home subnet and a closed service list. "
-        "Never trigger any physical side effect merely to test connectivity."
+        "Never trigger any physical side effect merely to test connectivity. "
+        "For HA-owned sprinkler schedules use get_sprinkler_schedule, then "
+        "preview_sprinkler_schedule_update, then update_sprinkler_schedule with the "
+        "fresh expected_sha256 and confirmed=true for an explicitly authorized change. "
+        "Patch only requested zones/fields and preserve weather/rain policies. "
+        "Reread the schedule after saving. Native Wyze schedule tools remain read-only. "
+        "After a Codex capability repair, leave the original user task for execution "
+        "and end-to-end verification in ChatGPT unless the user explicitly requests otherwise."
     ),
 )
 
@@ -6540,14 +6549,17 @@ def _validate_automation_actions(
             if "response_variable" in value or "continue_on_error" in value:
                 raise ValueError("Sprinkler actions do not return responses")
         if daily_forecast:
-            if config.AUTOMATION_DAILY_FORECAST_ENTITY is None or entity_ids != [
-                config.AUTOMATION_DAILY_FORECAST_ENTITY
-            ]:
+            approved = {}
+            if config.AUTOMATION_DAILY_FORECAST_ENTITY:
+                approved[config.AUTOMATION_DAILY_FORECAST_ENTITY] = "daily"
+            if config.AUTOMATION_RAIN_FORECAST_ENTITY:
+                approved[config.AUTOMATION_RAIN_FORECAST_ENTITY] = "twice_daily"
+            if len(entity_ids) != 1 or entity_ids[0] not in approved:
                 raise ValueError(
                     "weather.get_forecasts is limited to the configured forecast entity"
                 )
-            if data != {"type": "daily"}:
-                raise ValueError("Automation forecasts must request daily data")
+            if data != {"type": approved[entity_ids[0]]}:
+                raise ValueError("Automation forecasts must request the configured forecast type (daily or twice_daily)")
             response_variable = value.get("response_variable")
             if not isinstance(response_variable, str) or not SERVICE_PART_RE.fullmatch(
                 response_variable
@@ -6561,6 +6573,122 @@ def _validate_automation_actions(
                 raise ValueError("continue_on_error must be true or false")
     for item in value.values():
         _validate_automation_actions(item, sprinkler_device_id=sprinkler_device_id)
+
+
+_watering_schedule_lock = asyncio.Lock()
+
+
+async def _watering_snapshot() -> tuple[str, str, dict, dict]:
+    entity = config.SPRINKLER_SCHEDULE_ENTITY
+    if not entity:
+        raise ValueError("No HA-owned sprinkler schedule is configured for editing")
+    entity, automation_id = await _resolve_automation(entity)
+    state = await ha.state(entity)
+    current = await ha.get_automation_config(automation_id)
+    if state.get("state") not in {"on", "off"}:
+        raise ValueError("Schedule enablement is unavailable")
+    return entity, automation_id, state, current
+
+
+async def _watering_result(state: dict, current: dict, model: dict) -> dict:
+    ha_config = await ha.request("GET", "/api/config")
+    timezone = ha_config["time_zone"]
+    return {"source": "home_assistant_automation", "entity_id": state["entity_id"],
+            "enabled": state["state"] == "on", "time_zone": timezone,
+            "expected_sha256": watering.fingerprint(watering.definition(current)),
+            **watering.public_plan(model, datetime.now(ZoneInfo(timezone)).date())}
+
+
+@mcp.tool(title="Read HA per-zone sprinkler schedule", annotations=READ)
+async def get_sprinkler_schedule() -> dict[str, Any]:
+    """Read the live HA scheduling source, version hash, per-zone periods/start times/base runtimes and weather policy. Native Wyze schedules and current controller duration controls are separate. Read this before every edit; calendar eligibility is not a weather prediction."""
+    _, _, state, current = await _watering_snapshot()
+    model = watering.read_model(current)
+    _audit_tool("get_sprinkler_schedule", entity_id=state["entity_id"])
+    return await _watering_result(state, current, model)
+
+
+async def _watering_proposal(changes: list[ZonePatch], expected_sha256: str):
+    entity, automation_id, state, current = await _watering_snapshot()
+    if watering.fingerprint(watering.definition(current)) != expected_sha256:
+        raise ValueError("Schedule changed since read; reread and review before retrying")
+    model, candidate = watering.propose(current, changes)
+    device = await _sprinkler_device_id()
+    candidate = _validate_automation_config(candidate, sprinkler_device_id=device)
+    zones = await list_sprinkler_zones()
+    available = {z["zone_id"] for z in zones["zones"] if z["enabled"]}
+    if any(z["zone_id"] not in available for z in model["zones"]):
+        raise ValueError("All scheduled zones must still be present and enabled")
+    return entity, automation_id, state, current, model, candidate
+
+
+@mcp.tool(title="Preview HA per-zone sprinkler schedule edit", annotations=READ)
+async def preview_sprinkler_schedule_update(
+    changes: Annotated[list[ZonePatch], Field(min_length=1, max_length=8)],
+    expected_sha256: Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")],
+) -> dict[str, Any]:
+    """Validate a partial per-zone edit without writing. Omit unchanged fields/zones. periods replaces only that zone's complete ordered period list: daily, interval anchored at start_date, or named weekdays; optional inclusive end_date. start_time is local HH:MM:00. runtime_seconds is the base; existing weather multipliers persist. Use get_sprinkler_schedule's hash, review this preview, then update with confirmed=true only for the user's authorized change."""
+    _, _, state, current, model, candidate = await _watering_proposal(changes, expected_sha256)
+    _audit_tool("preview_sprinkler_schedule_update", entity_id=state["entity_id"])
+    return {"status": "validated_no_write", "candidate_sha256": watering.fingerprint(candidate),
+            **await _watering_result(state, current, model)}
+
+
+@mcp.tool(title="Update HA per-zone sprinkler schedule", annotations=WRITE)
+async def update_sprinkler_schedule(
+    changes: Annotated[list[ZonePatch], Field(min_length=1, max_length=8)],
+    expected_sha256: Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")],
+    confirmed: bool = False,
+) -> dict[str, Any]:
+    """Save an explicitly authorized partial schedule edit after live validation and backup. Read and preview first. Preserves unspecified zones, weather/rain policies, enablement and ordered group controls. Verifies saved definition and enablement; never starts watering, updates controller runtimes or enables native Wyze schedules. On uncertain/conflicting readback return recovery_required with retained backup; do not blindly retry. Reread with get_sprinkler_schedule for final ChatGPT acceptance."""
+    _require_write()
+    _require_confirmed(confirmed, "Updating the sprinkler schedule")
+    async with _watering_schedule_lock:
+        entity, automation_id, state, current, model, candidate = await _watering_proposal(changes, expected_sha256)
+        status = await get_sprinkler_command_status()
+        logical = status["logical_run"]
+        no_retained_run = (logical["state"] == "unavailable"
+                           and not any(logical.get(k) for k in ("can_pause", "can_resume", "can_stop", "current_zone", "remaining_queued_zones"))
+                           and (status.get("integration_command_status") or {}).get("status") == "idle")
+        if status.get("pending_command") or (logical["state"] not in {"idle", "completed", "stopped"} and not no_retained_run) or status["controller_state"]["state"] != "idle":
+            raise ValueError("Schedule edits require an idle controller and no active/paused logical group")
+        if state.get("attributes", {}).get("current", 0):
+            raise ValueError("The schedule automation is currently running")
+        original = watering.definition(current)
+        if candidate == original:
+            return {"status": "unchanged", **await _watering_result(state, current, model)}
+        backup = ha.backup_automations("update-sprinkler-schedule")
+        latest = watering.definition(await ha.get_automation_config(automation_id))
+        if latest != original or (await ha.state(entity))["state"] != state["state"]:
+            raise ValueError("Schedule changed during backup; no write performed")
+        candidate_hash = watering.fingerprint(candidate)
+        try:
+            await ha.save_automation_config(automation_id, candidate)
+            saved = await ha.get_automation_config(automation_id)
+            saved_state = await ha.state(entity)
+            if watering.definition(saved) != candidate or saved_state["state"] != state["state"]:
+                raise ValueError("Saved schedule verification failed")
+            watering.read_model(saved)
+        except Exception:
+            # A failed POST may have committed. Inspect before recovery; never replace
+            # a third-party definition or reissue a physical/device command.
+            recovery = "recovery_required"
+            try:
+                observed = watering.definition(await ha.get_automation_config(automation_id))
+                if observed == original:
+                    recovery = "original_verified"
+                elif observed == candidate:
+                    await ha.save_automation_config(automation_id, original)
+                    if watering.definition(await ha.get_automation_config(automation_id)) == original:
+                        recovery = "rolled_back"
+            except Exception:
+                pass
+            _audit_tool("update_sprinkler_schedule", entity_id=entity, status=recovery, backup=backup)
+            return {"status": recovery, "backup": backup, "verified": False,
+                    "note": "Update did not complete verification. Read the live schedule before any retry. A conflicting/unknown definition is not overwritten; retained backup is available for guarded maintenance."}
+        _audit_tool("update_sprinkler_schedule", entity_id=entity, backup=backup, candidate_sha256=candidate_hash, status="verified")
+        return {"status": "verified", "verified": True, "backup": backup,
+                **await _watering_result(saved_state, saved, model)}
 
 
 @mcp.tool(title="Create a Home Assistant automation", annotations=WRITE)
@@ -6602,27 +6730,29 @@ async def update_automation(
     automation_id: str, automation: dict[str, Any], confirmed: bool = False
 ) -> dict[str, Any]:
     """Replace one automation configuration after backing up relevant Home Assistant files."""
-    _require_write()
-    _require_confirmed(confirmed, "Updating an automation")
-    validate_automation_id(automation_id)
-    sprinkler_device_id = (
-        await _sprinkler_device_id()
-        if _automation_uses_managed_sprinkler(automation.get("actions"))
-        else None
-    )
-    validated = _validate_automation_config(
-        automation, sprinkler_device_id=sprinkler_device_id
-    )
-    await _resolve_automation(automation_id)
-    backup = ha.backup_automations("update-automation")
-    result = await ha.save_automation_config(automation_id, validated)
-    _audit_tool("update_automation", automation_id=automation_id, backup=backup)
-    return {
-        "status": "completed",
-        "automation_id": automation_id,
-        "backup": backup,
-        "result": result,
-    }
+    async with _watering_schedule_lock:
+        _require_write()
+        _require_confirmed(confirmed, "Updating an automation")
+        validate_automation_id(automation_id)
+        sprinkler_device_id = (
+            await _sprinkler_device_id()
+            if _automation_uses_managed_sprinkler(automation.get("actions"))
+            else None
+        )
+        validated = _validate_automation_config(
+            automation, sprinkler_device_id=sprinkler_device_id
+        )
+        await _resolve_automation(automation_id)
+        backup = ha.backup_automations("update-automation")
+        result = await ha.save_automation_config(automation_id, validated)
+        _audit_tool("update_automation", automation_id=automation_id, backup=backup)
+        return {
+            "status": "completed",
+            "automation_id": automation_id,
+            "backup": backup,
+            "result": result,
+        }
+
 
 
 @mcp.tool(title="Enable a Home Assistant automation", annotations=IDEMPOTENT_WRITE)

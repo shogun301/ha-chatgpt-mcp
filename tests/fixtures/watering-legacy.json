@@ -1,0 +1,159 @@
+{
+  "id": "test_watering",
+  "alias": "Test watering",
+  "description": "Synthetic forecast-adjusted ordered group",
+  "triggers": [
+    {
+      "at": "05:00:00",
+      "id": "morning_0500",
+      "trigger": "time"
+    }
+  ],
+  "conditions": [],
+  "actions": [
+    {
+      "choose": [
+        {
+          "conditions": [
+            {
+              "condition": "trigger",
+              "id": "morning_0500"
+            },
+            {
+              "condition": "template",
+              "value_template": "{% set ymd = now().strftime('%Y-%m-%d') %}\n{% set alternate_start = as_datetime('2030-09-13').date() %}\n{{ ('2030-08-29' <= ymd <= '2030-09-11') or (now().date() >= alternate_start and ((now().date() - alternate_start).days % 2 == 0)) }}"
+            }
+          ],
+          "sequence": [
+            {
+              "action": "weather.get_forecasts",
+              "continue_on_error": true,
+              "data": {
+                "type": "daily"
+              },
+              "response_variable": "daily_forecast",
+              "target": {
+                "entity_id": "weather.test_temperature"
+              }
+            },
+            {
+              "action": "weather.get_forecasts",
+              "continue_on_error": true,
+              "data": {
+                "type": "twice_daily"
+              },
+              "response_variable": "rain_forecast",
+              "target": {
+                "entity_id": "weather.test_rain"
+              }
+            },
+            {
+              "alias": "Rain gate",
+              "condition": "template",
+              "value_template": "{% set start = today_at() %}\n{% set end = start + timedelta(days=2) %}\n{% set response = rain_forecast if rain_forecast is defined and rain_forecast is mapping else {} %}\n{% set provider = response.get('weather.test_rain') %}\n{% set entries = provider.get('forecast') if provider is mapping else none %}\n{% set forecasts = entries if entries is sequence and entries is not string and entries is not mapping else [] %}\n{% set ns = namespace(wet=false) %}\n{% for item in forecasts %}\n  {% set dt = as_datetime(item.get('datetime'), none) if item is mapping else none %}\n  {% if dt is not none %}\n    {% set period_start = as_local(dt) %}\n    {% set period_end = period_start + timedelta(hours=12) %}\n    {% set probability = item.get('precipitation_probability') %}\n    {% if period_start < end and period_end > start and is_number(probability) %}\n      {% set ns.wet = ns.wet or probability | float > 50 %}\n    {% endif %}\n  {% endif %}\n{% endfor %}\n{% set last_rain = states('sensor.test_rain_date') %}\n{% set rain_today = states('sensor.test_rain_today') %}\n{% set rain_rate = states('sensor.test_rain_rate') %}\n{{ not ((rain_today | float(0)) > 0\n        or (rain_rate | float(0)) > 0\n        or last_rain in [now().date().isoformat(), (now().date() - timedelta(days=1)).isoformat()]\n        or ns.wet) }}"
+            },
+            {
+              "choose": [
+                {
+                  "conditions": [
+                    {
+                      "condition": "template",
+                      "value_template": "{% set forecasts = daily_forecast.get('weather.test_temperature', {}).get('forecast', []) if daily_forecast is defined and daily_forecast is mapping else [] %}\n{% set ns = namespace(high=none) %}\n{% for item in forecasts %}\n  {% set dt = item.get('datetime') if item is mapping else none %}\n  {% if dt is not none and as_local(as_datetime(dt)).date() == now().date() %}\n    {% set ns.high = item.get('temperature') %}\n  {% endif %}\n{% endfor %}\n{{ ns.high is not none and (ns.high | float) > 95 }}"
+                    }
+                  ],
+                  "sequence": [
+                    {
+                      "action": "wyzeapi.run_sprinkler_sequence",
+                      "data": {
+                        "command_id": "morning_hot",
+                        "source": "scheduled",
+                        "zones": [
+                          {
+                            "duration_seconds": 528,
+                            "zone": 1
+                          },
+                          {
+                            "duration_seconds": 528,
+                            "zone": 2
+                          },
+                          {
+                            "duration_seconds": 528,
+                            "zone": 3
+                          }
+                        ]
+                      },
+                      "target": {
+                        "device_id": "test-controller"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "conditions": [
+                    {
+                      "condition": "template",
+                      "value_template": "{% set forecasts = daily_forecast.get('weather.test_temperature', {}).get('forecast', []) if daily_forecast is defined and daily_forecast is mapping else [] %}\n{% set ns = namespace(high=none) %}\n{% for item in forecasts %}\n  {% set dt = item.get('datetime') if item is mapping else none %}\n  {% if dt is not none and as_local(as_datetime(dt)).date() == now().date() %}\n    {% set ns.high = item.get('temperature') %}\n  {% endif %}\n{% endfor %}\n{{ ns.high is not none and (ns.high | float) < 85 }}"
+                    }
+                  ],
+                  "sequence": [
+                    {
+                      "action": "wyzeapi.run_sprinkler_sequence",
+                      "data": {
+                        "command_id": "morning_cold",
+                        "source": "scheduled",
+                        "zones": [
+                          {
+                            "duration_seconds": 432,
+                            "zone": 1
+                          },
+                          {
+                            "duration_seconds": 432,
+                            "zone": 2
+                          },
+                          {
+                            "duration_seconds": 432,
+                            "zone": 3
+                          }
+                        ]
+                      },
+                      "target": {
+                        "device_id": "test-controller"
+                      }
+                    }
+                  ]
+                }
+              ],
+              "default": [
+                {
+                  "action": "wyzeapi.run_sprinkler_sequence",
+                  "data": {
+                    "command_id": "morning_default",
+                    "source": "scheduled",
+                    "zones": [
+                      {
+                        "duration_seconds": 480,
+                        "zone": 1
+                      },
+                      {
+                        "duration_seconds": 480,
+                        "zone": 2
+                      },
+                      {
+                        "duration_seconds": 480,
+                        "zone": 3
+                      }
+                    ]
+                  },
+                  "target": {
+                    "device_id": "test-controller"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "mode": "single"
+}

@@ -8,7 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH="/app/.venv/bin:$PATH"
 
 LABEL org.opencontainers.image.source="https://github.com/shogun301/ha-chatgpt-mcp" \
-      org.opencontainers.image.version="2.7.11" \
+      org.opencontainers.image.version="2.7.12" \
       org.opencontainers.image.revision="${VCS_REF}"
 
 RUN apt-get update && apt-get install -y --no-install-recommends nodejs && \

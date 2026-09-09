@@ -75,6 +75,10 @@ if not 1 <= SPRINKLER_ZONE_COUNT <= 8:
 AUTOMATION_DAILY_FORECAST_ENTITY = _optional_entity_id(
     "AUTOMATION_DAILY_FORECAST_ENTITY", "weather"
 )
+AUTOMATION_RAIN_FORECAST_ENTITY = _optional_entity_id(
+    "AUTOMATION_RAIN_FORECAST_ENTITY", "weather"
+)
+SPRINKLER_SCHEDULE_ENTITY = _optional_entity_id("SPRINKLER_SCHEDULE_ENTITY", "automation")
 LIVING_CLIMATE_ENTITY = (
     _optional("LIVING_CLIMATE_ENTITY") or "climate.living_space_thermostat"
 )

@@ -6,6 +6,8 @@ param(
     [Parameter(Mandatory)][ValidatePattern('^https://')][string]$PublicFrontendUrl,
     [Parameter(Mandatory)][ValidatePattern('^https://')][string]$PublicMcpUrl,
     [string]$SshAddress,
+    [ValidatePattern('^weather\.[a-z0-9_]+$')][string]$AutomationRainForecastEntity,
+    [ValidatePattern('^automation\.[a-z0-9_]+$')][string]$SprinklerScheduleEntity,
     [switch]$PreflightOnly,
     [switch]$ReuseVerifiedWyzeOverlay
 )
@@ -20,7 +22,7 @@ if ($SshAddress -and (
     throw 'SshAddress must be a literal IPv4 address.'
 }
 
-$releaseVersion = '2.7.11'
+$releaseVersion = '2.7.12'
 $sourceRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $secretRoot = if ($SecretStagingPath) { [IO.Path]::GetFullPath($SecretStagingPath) } else { $null }
 $requiredSecrets = @(
@@ -114,12 +116,12 @@ set -Eeuo pipefail
 set +x
 umask 077
 
-release_version='2.7.11'
+release_version='2.7.12'
 release_commit='__RELEASE_COMMIT__'
 preflight_only='__PREFLIGHT_ONLY__'
 reuse_verified_overlay='__REUSE_VERIFIED_OVERLAY__'
 archive_sha256='__ARCHIVE_SHA256__'
-archive_path='/tmp/ha-chatgpt-mcp-2.7.11.tar.gz'
+archive_path='/tmp/ha-chatgpt-mcp-2.7.12.tar.gz'
 candidate_tag="ha-chatgpt-mcp:candidate-$release_commit"
 release_stage=$(mktemp -d /tmp/ha-mcp-release.XXXXXX)
 app_root='/opt/ha-chatgpt-mcp'
@@ -145,6 +147,7 @@ prior_image_ref=''
 tested_image_id=''
 smoke_container="ha-mcp-release-smoke-$stamp"
 preflight_container="ha-mcp-release-preflight-$stamp"
+candidate_env="/tmp/ha-mcp-runtime-$stamp.env"
 prior_collector_enabled='disabled'
 prior_collector_active='inactive'
 prior_collector_active_enter=''
@@ -191,6 +194,7 @@ record_marker() {
 
 cleanup_staging() {
   sudo docker rm -f "$preflight_container" >/dev/null 2>&1 || true
+  sudo rm -f "$candidate_env"
   sudo docker rm -f "$smoke_container" >/dev/null 2>&1 || true
   sudo docker image rm "$candidate_tag" >/dev/null 2>&1 || true
   sudo rm -rf -- "$release_stage"
@@ -554,8 +558,20 @@ sudo docker exec "$smoke_container" python -c \
 sudo docker rm -f "$smoke_container" >/dev/null
 
 stage='running_live_read_only_preflight'
+sudo python3 - "$app_root/.env" "$candidate_env" '__RAIN_FORECAST_ENTITY__' '__SPRINKLER_SCHEDULE_ENTITY__' <<'PYENV'
+import pathlib, re, sys
+source, target, rain, schedule = sys.argv[1:]
+text = pathlib.Path(source).read_text()
+for key, value, domain in [('AUTOMATION_RAIN_FORECAST_ENTITY', rain, 'weather'), ('SPRINKLER_SCHEDULE_ENTITY', schedule, 'automation')]:
+    if not value:
+        continue
+    assert re.fullmatch(domain + r'\.[a-z0-9_]+', value)
+    text = '\n'.join(line for line in text.splitlines() if not line.startswith(key+'=')) + '\n' + key + '=' + value + '\n'
+pathlib.Path(target).write_text(text)
+pathlib.Path(target).chmod(0o600)
+PYENV
 sudo docker run -d --name "$preflight_container" --network host --read-only \
-  --env-file "$app_root/.env" \
+  --env-file "$candidate_env" \
   --env PUBLIC_BASE_URL=https://preflight.invalid \
   --env PRODUCTION_VERIFY_BASE_URL=http://127.0.0.1:8001 \
   --env MCP_LOCAL_BASE_URL=http://127.0.0.1:8001 \
@@ -590,7 +606,7 @@ for attempt in $(seq 1 30); do
 done
 curl --fail --silent --max-time 5 http://127.0.0.1:8001/healthz \
   >/tmp/ha-mcp-preflight-health.json
-python3 -c 'import json; p=json.load(open("/tmp/ha-mcp-preflight-health.json", encoding="utf-8")); assert p.get("status") == "ok" and p.get("service_version") == "2.7.11"'
+python3 -c 'import json; p=json.load(open("/tmp/ha-mcp-preflight-health.json", encoding="utf-8")); assert p.get("status") == "ok" and p.get("service_version") == "2.7.12"'
 sudo docker exec "$preflight_container" python -m scripts.production_mcp_verify
 sudo docker rm -f "$preflight_container" >/dev/null
 rm -f /tmp/ha-mcp-preflight-health.json
@@ -654,6 +670,7 @@ sudo find "$app_root" -mindepth 1 -maxdepth 1 \
   ! -name .env ! -name secrets ! -name data ! -name logs ! -name backups \
   -exec rm -rf -- {} +
 sudo tar -C "$release_stage" -cf - . | sudo tar -C "$app_root" -xf -
+sudo cp "$candidate_env" "$app_root/.env"
 if [ -s /tmp/solaredge_client_id ]; then
   for secret_name in solaredge_client_id solaredge_client_secret solaredge_token_key solaredge_bridge_secret; do
     sudo install -o 10001 -g 10001 -m 0400 "/tmp/$secret_name" "$app_root/secrets/$secret_name"
@@ -776,7 +793,7 @@ with open('/tmp/ha-mcp-health.json', encoding='utf-8') as handle:
     payload = json.load(handle)
 assert payload.get('status') == 'ok'
 assert payload.get('home_assistant', {}).get('reachable') is True
-assert payload.get('service_version') == '2.7.11'
+assert payload.get('service_version') == '2.7.12'
 PY
 rm -f /tmp/ha-mcp-health.json
 curl --fail --silent --max-time 5 http://127.0.0.1:8123/ >/dev/null
@@ -788,7 +805,7 @@ for attempt in $(seq 1 180); do
     200|302|403)
       if curl --fail --silent --max-time 10 __PUBLIC_MCP_URL__/healthz \
           >/tmp/ha-mcp-public-health.json && \
-         python3 -c 'import json; p=json.load(open("/tmp/ha-mcp-public-health.json", encoding="utf-8")); assert p.get("status") == "ok" and p.get("service_version") == "2.7.11"'; then
+         python3 -c 'import json; p=json.load(open("/tmp/ha-mcp-public-health.json", encoding="utf-8")); assert p.get("status") == "ok" and p.get("service_version") == "2.7.12"'; then
         fixed_routes_ready=1
         break
       fi
@@ -927,6 +944,10 @@ try {
         '__PREFLIGHT_ONLY__', $preflightFlag
     ).Replace(
         '__REUSE_VERIFIED_OVERLAY__', $reuseOverlayFlag
+    ).Replace(
+        '__RAIN_FORECAST_ENTITY__', $AutomationRainForecastEntity
+    ).Replace(
+        '__SPRINKLER_SCHEDULE_ENTITY__', $SprinklerScheduleEntity
     )
     [IO.File]::WriteAllText(
         $remoteScriptPath,

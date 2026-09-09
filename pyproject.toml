@@ -1,6 +1,6 @@
 [project]
 name = "ha-chatgpt-mcp"
-version = "2.7.11"
+version = "2.7.12"
 requires-python = ">=3.12"
 dependencies = [
   "aiohttp>=3.12,<4",
@@ -32,7 +32,10 @@ collector = ["README.md", "ha-host-diagnostics.service"]
 "home_assistant.wyzeapi_overlay.custom_components.wyzeapi" = ["manifest.json", "services.yaml"]
 
 [dependency-groups]
-dev = ["pytest>=9,<10"]
+dev = [
+    "jinja2>=3.1.6,<4",
+    "pytest>=9,<10",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

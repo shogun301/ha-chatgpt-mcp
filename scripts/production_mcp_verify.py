@@ -38,10 +38,13 @@ DIAGNOSTIC_TOOLS = (
     "probe_lan_node",
 )
 LAN_PROBE_SERVICES = ("dns", "router_ssh")
-EXPECTED_VERSION = "2.7.11"
-EXPECTED_TOOL_COUNT = 115
-CONTRACT_PATH = Path("/app/tests/fixtures/server-contract-2.7.11.json")
+EXPECTED_VERSION = "2.7.12"
+EXPECTED_TOOL_COUNT = 118
+CONTRACT_PATH = Path("/app/tests/fixtures/server-contract-2.7.12.json")
 NEW_CAPABILITY_TOOLS = {
+    "get_sprinkler_schedule",
+    "preview_sprinkler_schedule_update",
+    "update_sprinkler_schedule",
     "discover_custom_card_resources",
     "read_custom_card_resource",
     "validate_custom_card_resource",
@@ -85,6 +88,7 @@ DIAGNOSTIC_REQUESTS: dict[str, dict[str, Any]] = {
     },
 }
 SPRINKLER_READ_REQUESTS: dict[str, dict[str, Any]] = {
+    "get_sprinkler_schedule": {},
     "list_sprinkler_zones": {},
     "get_sprinkler_configuration": {},
     "get_sprinkler_summary": {},
@@ -423,6 +427,13 @@ def _validate_sprinkler_result(name: str, payload: dict[str, Any]) -> None:
             raise AssertionError("logical sprinkler skip eligibility is not fail-closed")
     elif name == "list_sprinkler_schedules":
         _assert_unsupported(payload.get("mutations"), "schedule mutations")
+    elif name == "get_sprinkler_schedule":
+        if payload.get("source") != "home_assistant_automation" or not payload.get("zones"):
+            raise AssertionError("HA-owned watering schedule source is missing")
+        if not re.fullmatch(r"[a-f0-9]{64}", payload.get("expected_sha256", "")):
+            raise AssertionError("Watering schedule version hash is missing")
+        if len(payload.get("calendar", [])) != 14 or not isinstance(payload.get("enabled"), bool):
+            raise AssertionError("Watering schedule calendar/enablement is invalid")
     elif name == "get_sprinkler_weather_and_decisions":
         _assert_unsupported(payload.get("wyze_weather_data"), "raw Wyze weather")
         _assert_unsupported(

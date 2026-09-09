@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.7.12 - 2026-09-08
+
+- Add HA per-zone schedule read, preview and guarded partial-update tools, preserving weather/rain policies and ordered groups.
+- Permit deployment-approved daily and twice-daily forecast targets without broadening generic service access.
+- Add stale-write, readback, safe recovery and independent Jinja execution tests. Advertise 118 typed tools.
+- Deploy capability configuration without changing live watering definitions.
+
+
 ## 2.7.11 - 2026-09-07
 
 - Add five typed tools for administrator-approved embedded custom-card resources, with exact source reads, parsing, required registrations, optimistic hash guards, durable backups, verified publication and rollback.
