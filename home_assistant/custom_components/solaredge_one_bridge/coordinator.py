@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -10,7 +11,10 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .client import BridgeError, SolarEdgeBridgeClient
-from .const import DEFAULT_UPDATE_INTERVAL, DOMAIN
+from .const import (
+    CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL_SECONDS, DOMAIN,
+    MIN_POLL_INTERVAL_SECONDS, MAX_POLL_INTERVAL_SECONDS,
+)
 from .model import SolarEdgeSnapshot
 
 _LOGGER = logging.getLogger(__name__)
@@ -30,7 +34,10 @@ class SolarEdgeBridgeCoordinator(DataUpdateCoordinator[SolarEdgeSnapshot]):
             logger=_LOGGER,
             name=DOMAIN,
             config_entry=entry,
-            update_interval=DEFAULT_UPDATE_INTERVAL,
+            update_interval=timedelta(seconds=max(MIN_POLL_INTERVAL_SECONDS, min(
+                MAX_POLL_INTERVAL_SECONDS,
+                int(entry.options.get(CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL_SECONDS)),
+            ))),
         )
         self._client = client
 

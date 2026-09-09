@@ -33,6 +33,7 @@ async def async_setup_entry(
     coordinator = SolarEdgeBridgeCoordinator(hass, entry, client)
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = coordinator
+    entry.async_on_unload(entry.add_update_listener(_async_update_options))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     try:
         await async_setup_export_event_manager(hass, entry, coordinator)
@@ -63,3 +64,8 @@ async def async_unload_entry(
         await async_unload_export_event_manager(hass, entry.entry_id)
         hass.services.async_remove(DOMAIN, SERVICE_GET_FULL_DATA)
     return unloaded
+
+
+async def _async_update_options(hass: HomeAssistant, entry: SolarEdgeBridgeConfigEntry) -> None:
+    """Apply polling changes through the normal integration reload."""
+    await hass.config_entries.async_reload(entry.entry_id)

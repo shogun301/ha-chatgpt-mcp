@@ -15,13 +15,22 @@ from .client import (
     SolarEdgeBridgeClient,
     is_local_endpoint,
 )
-from .const import CONF_ENDPOINT, CONF_SHARED_SECRET, DEFAULT_ENDPOINT, DOMAIN
+from .const import (
+    CONF_ENDPOINT, CONF_SHARED_SECRET, DEFAULT_ENDPOINT, DOMAIN,
+    CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL_SECONDS,
+    MIN_POLL_INTERVAL_SECONDS, MAX_POLL_INTERVAL_SECONDS,
+)
 
 
 class SolarEdgeMonitoringBridgeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Configure the one supported SolarEdge Monitoring bridge."""
 
     VERSION = 1
+
+    @staticmethod
+    def async_get_options_flow(config_entry: config_entries.ConfigEntry) -> BridgeOptionsFlow:
+        """Return configurable polling options."""
+        return BridgeOptionsFlow()
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -67,3 +76,27 @@ class SolarEdgeMonitoringBridgeConfigFlow(config_entries.ConfigFlow, domain=DOMA
             }
         )
         return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
+
+
+class BridgeOptionsFlow(config_entries.OptionsFlow):
+    """Configure the bridge polling interval."""
+
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            interval = user_input.get(CONF_POLL_INTERVAL)
+            if type(interval) is not int or not MIN_POLL_INTERVAL_SECONDS <= interval <= MAX_POLL_INTERVAL_SECONDS:
+                errors["base"] = "invalid_poll_interval"
+            else:
+                return self.async_create_entry(
+                    title="", data={**self.config_entry.options, CONF_POLL_INTERVAL: interval}
+                )
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema({
+                vol.Required(CONF_POLL_INTERVAL, default=self.config_entry.options.get(
+                    CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL_SECONDS
+                )): vol.All(int, vol.Range(min=MIN_POLL_INTERVAL_SECONDS, max=MAX_POLL_INTERVAL_SECONDS)),
+            }),
+            errors=errors,
+        )
