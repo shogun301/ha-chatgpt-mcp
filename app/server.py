@@ -7097,6 +7097,9 @@ async def internal_solaredge_full_data(request: Request) -> Response:
     return JSONResponse(result)
 
 
+from .chefiq import register_chef_iq_tools
+register_chef_iq_tools(mcp, ha, READ, _audit_tool)
+
 transport_security = TransportSecuritySettings(
     allowed_hosts=[
         "127.0.0.1",

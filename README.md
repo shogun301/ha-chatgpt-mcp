@@ -8,7 +8,7 @@ An OAuth-protected
 [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server for
 securely connecting ChatGPT, Codex, and other MCP clients to Home Assistant.
 
-The project exposes 118 typed tools for discovery, dashboards, schedules,
+The project exposes 120 typed tools for discovery, dashboards, schedules,
 climate, energy, media, cleaning, irrigation, automations, diagnostics, and
 carefully bounded device control. It keeps Home Assistant's API private and
 deliberately avoids becoming a generic shell, log reader, network scanner, or
@@ -45,7 +45,7 @@ unrestricted service proxy.
 - **OAuth-native remote access:** authorization code flow with S256 PKCE,
   dynamic client registration, scoped access tokens, and MCP resource metadata.
 
-Version **2.7.12** currently advertises **118 tools**. See
+Version **2.7.12** currently advertises **120 tools**. See
 [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## Architecture

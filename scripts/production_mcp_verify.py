@@ -39,7 +39,7 @@ DIAGNOSTIC_TOOLS = (
 )
 LAN_PROBE_SERVICES = ("dns", "router_ssh")
 EXPECTED_VERSION = "2.7.12"
-EXPECTED_TOOL_COUNT = 118
+EXPECTED_TOOL_COUNT = 120
 CONTRACT_PATH = Path("/app/tests/fixtures/server-contract-2.7.12.json")
 NEW_CAPABILITY_TOOLS = {
     "get_sprinkler_schedule",

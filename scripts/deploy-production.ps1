@@ -463,6 +463,9 @@ on_exit() {
   local exit_code=$?
   local rollback_exit=0
   trap - EXIT
+  if [ "$exit_code" -ne 0 ] && [ "$mutated" -eq 0 ]; then
+    printf 'Production candidate failed before deployment at stage=%s; running services unchanged.\n' "$stage" >&2
+  fi
   if [ "$exit_code" -ne 0 ] && [ "$mutated" -eq 1 ]; then
     failed_stage="$stage"
     printf 'Production release failed at stage=%s; starting rollback.\n' "$failed_stage" >&2

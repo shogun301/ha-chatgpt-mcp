@@ -2,11 +2,13 @@
 
 ## 2.7.12 - 2026-09-08
 
+- Preserve the two already-live read-only CHEF iQ sensor tools while rebuilding MCP; no provider client or credentials are included.
+
 - Reconcile the already-live SolarEdge polling Options flow into the immutable source; preserve current options and avoid changing or restarting that integration.
 
 - Add HA per-zone schedule read, preview and guarded partial-update tools, preserving weather/rain policies and ordered groups.
 - Permit deployment-approved daily and twice-daily forecast targets without broadening generic service access.
-- Add stale-write, readback, safe recovery and independent Jinja execution tests. Advertise 118 typed tools.
+- Add stale-write, readback, safe recovery and independent Jinja execution tests. Advertise 120 typed tools.
 - Deploy capability configuration without changing live watering definitions.
 
 
