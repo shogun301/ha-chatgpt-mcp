@@ -107,7 +107,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 LOGGER = logging.getLogger("ha_chatgpt_mcp")
-SERVER_VERSION = "2.7.12"
+SERVER_VERSION = "2.7.13"
 audit = AuditLog(config.AUDIT_LOG_PATH)
 oauth = OAuthServer(
     OAuthStore(config.DATABASE_PATH),
@@ -262,6 +262,16 @@ TURNABLE_DOMAINS = {
     "vacuum",
     "water_heater",
 }
+
+# Gosund smart plugs, power strips, and wall switches reach Home Assistant through
+# Tuya-family or locally flashed integrations, so the device registry, not a
+# service domain, identifies them. Only exact switch entities on a matched
+# device are controllable, and the service surface stays switch.turn_on/off.
+GOSUND_DEVICE_MARKERS = config.GOSUND_DEVICE_MARKERS
+GOSUND_DEVICE_IDS = config.GOSUND_DEVICE_IDS
+GOSUND_MATCH_FIELDS = ("manufacturer", "model", "name_by_user", "name")
+GOSUND_READING_CLASSES = ("power", "current", "voltage", "energy")
+GOSUND_SWITCH_ACTIONS = {"turn_on": "on", "turn_off": "off"}
 
 SCHEDULE_DAYS = (
     "monday",
@@ -574,6 +584,9 @@ mcp = RedactingMCPServer(
         "changes. For home-LAN discovery or reachability, use the fixed read-only LAN tools; "
         "they accept only node IDs inside the configured home subnet and a closed service list. "
         "Never trigger any physical side effect merely to test connectivity. "
+        "For Gosund smart plugs, power strips, and wall switches, discover with "
+        "list_gosund_devices, read get_gosund_device_status, and change state only "
+        "through control_gosund_switch on one exact switch entity. "
         "For HA-owned sprinkler schedules use get_sprinkler_schedule, then "
         "preview_sprinkler_schedule_update, then update_sprinkler_schedule with the "
         "fresh expected_sha256 and confirmed=true for an explicitly authorized change. "
@@ -3383,6 +3396,249 @@ async def control_light(
     state = summarize_state(await ha.state(entity_id))
     _audit_tool("control_light", entity_id=entity_id, action=action)
     return {"status": "completed", "state": state}
+
+
+def _gosund_device_match(device: dict[str, Any]) -> str | None:
+    """Return why a device registry entry counts as Gosund, or None when it does not."""
+    if str(device.get("id") or "") in GOSUND_DEVICE_IDS:
+        return "configured_device_id"
+    for field in GOSUND_MATCH_FIELDS:
+        value = str(device.get(field) or "").casefold()
+        if value and any(marker in value for marker in GOSUND_DEVICE_MARKERS):
+            return field
+    return None
+
+
+def _gosund_reading(state: dict[str, Any]) -> dict[str, Any]:
+    attributes = state.get("attributes") or {}
+    raw = state.get("state")
+    value: float | None = None
+    if isinstance(raw, (int, float, str)) and raw not in ("unknown", "unavailable", ""):
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = None
+        if value is not None and not math.isfinite(value):
+            value = None
+    return {
+        "entity_id": state.get("entity_id"),
+        "value": value,
+        "unit": attributes.get("unit_of_measurement"),
+        "state": raw,
+        "last_updated": state.get("last_updated"),
+    }
+
+
+def _gosund_device_summary(
+    device: dict[str, Any],
+    match: str,
+    entities: list[dict[str, Any]],
+    state_by_id: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    switches: list[dict[str, Any]] = []
+    lights: list[dict[str, Any]] = []
+    readings: dict[str, dict[str, Any]] = {}
+    platforms: set[str] = set()
+    other = 0
+    for entity in entities:
+        if entity.get("disabled_by"):
+            continue
+        entity_id = str(entity.get("entity_id") or "")
+        domain = entity_id.split(".", 1)[0]
+        state = state_by_id.get(entity_id)
+        if entity.get("platform"):
+            platforms.add(str(entity["platform"]))
+        if domain == "switch":
+            switches.append(
+                summarize_state(state)
+                if state
+                else {"entity_id": entity_id, "state": None}
+            )
+        elif domain == "light":
+            lights.append(
+                summarize_state(state)
+                if state
+                else {"entity_id": entity_id, "state": None}
+            )
+        elif domain == "sensor" and state is not None:
+            device_class = str(
+                (state.get("attributes") or {}).get("device_class")
+                or entity.get("device_class")
+                or entity.get("original_device_class")
+                or ""
+            )
+            if device_class in GOSUND_READING_CLASSES and device_class not in readings:
+                readings[device_class] = _gosund_reading(state)
+            else:
+                other += 1
+        else:
+            other += 1
+    return {
+        "id": device.get("id"),
+        "name": device.get("name_by_user") or device.get("name"),
+        "manufacturer": device.get("manufacturer"),
+        "model": device.get("model"),
+        "area_id": device.get("area_id"),
+        "disabled_by": device.get("disabled_by"),
+        "integrations": sorted(platforms),
+        "match": match,
+        "switches": switches,
+        "lights": lights,
+        "readings": readings,
+        "other_entity_count": other,
+    }
+
+
+def _gosund_summaries(
+    devices: list[dict[str, Any]],
+    entities: list[dict[str, Any]],
+    states: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    entities_by_device: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for entity in entities:
+        if entity.get("device_id"):
+            entities_by_device[str(entity["device_id"])].append(entity)
+    state_by_id = {item["entity_id"]: item for item in states}
+    summaries = []
+    for device in devices:
+        match = _gosund_device_match(device)
+        if match is None:
+            continue
+        summaries.append(
+            _gosund_device_summary(
+                device,
+                match,
+                entities_by_device.get(str(device.get("id")), []),
+                state_by_id,
+            )
+        )
+    return summaries
+
+
+async def _gosund_registry() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    devices, entities = await asyncio.gather(ha.devices(), ha.entity_registry())
+    return devices, entities
+
+
+def _gosund_resolve(summaries: list[dict[str, Any]], identifier: str) -> dict[str, Any]:
+    """Resolve one matched Gosund device by registry ID, unique name, or member entity."""
+    for summary in summaries:
+        if summary["id"] == identifier:
+            return summary
+    if "." in identifier:
+        for summary in summaries:
+            members = summary["switches"] + summary["lights"]
+            members.extend(summary["readings"].values())
+            if any(item.get("entity_id") == identifier for item in members):
+                return summary
+        raise ValueError("That entity does not belong to a configured Gosund device")
+    named = [
+        item
+        for item in summaries
+        if str(item.get("name") or "").casefold() == identifier.casefold()
+    ]
+    if len(named) != 1:
+        raise ValueError(
+            "Gosund device name is missing or ambiguous; use the exact device registry ID"
+        )
+    return named[0]
+
+
+def _gosund_switch_owner(
+    summaries: list[dict[str, Any]], entity_id: str
+) -> dict[str, Any]:
+    for summary in summaries:
+        if any(item.get("entity_id") == entity_id for item in summary["switches"]):
+            return summary
+    raise PermissionError(
+        "That switch is not an enabled entity of a configured Gosund device; "
+        "use list_gosund_devices to find controllable Gosund switches"
+    )
+
+
+@mcp.tool(title="List Gosund devices", annotations=READ)
+async def list_gosund_devices(
+    area_id: Annotated[str | None, Field(max_length=120)] = None,
+    limit: Annotated[int, Field(ge=1, le=200)] = 100,
+) -> dict[str, Any]:
+    """List Gosund plugs, power strips, and switches with their switch entities and power readings."""
+    devices, entities = await _gosund_registry()
+    summaries = _gosund_summaries(devices, entities, await ha.states())
+    if area_id:
+        summaries = [item for item in summaries if item.get("area_id") == area_id]
+    items = summaries[:limit]
+    _audit_tool("list_gosund_devices", area_id=area_id, count=len(items))
+    return {
+        "count": len(items),
+        "devices": items,
+        "truncated": len(summaries) > limit,
+        "markers": list(GOSUND_DEVICE_MARKERS),
+        "configured_device_count": len(GOSUND_DEVICE_IDS),
+    }
+
+
+@mcp.tool(title="Get Gosund device status", annotations=READ)
+async def get_gosund_device_status(
+    identifier: Annotated[str, Field(min_length=1, max_length=255)],
+) -> dict[str, Any]:
+    """Read one Gosund device's switch states and power readings by device ID, unique name, or entity ID."""
+    devices, entities = await _gosund_registry()
+    summaries = _gosund_summaries(devices, entities, await ha.states())
+    device = _gosund_resolve(summaries, identifier)
+    _audit_tool("get_gosund_device_status", device_id=device["id"])
+    return {"device": device}
+
+
+@mcp.tool(title="Control a Gosund switch", annotations=IDEMPOTENT_WRITE)
+async def control_gosund_switch(
+    entity_id: str,
+    action: Literal["turn_on", "turn_off"],
+) -> dict[str, Any]:
+    """Use this when the user explicitly asks to turn one exact Gosund plug, outlet, or switch entity on or off."""
+    _require_write()
+    validate_entity_id(entity_id)
+    if not entity_id.startswith("switch."):
+        raise ValueError("entity_id must be a switch entity")
+    devices, entities = await _gosund_registry()
+    device = _gosund_switch_owner(
+        _gosund_summaries(devices, entities, await ha.states()), entity_id
+    )
+    await ha.call_service("switch", action, {"entity_id": entity_id})
+    await asyncio.sleep(1)
+    states = await ha.states()
+    updated = next(
+        (
+            item
+            for item in _gosund_summaries(devices, entities, states)
+            if item["id"] == device["id"]
+        ),
+        device,
+    )
+    raw_state = next(
+        (item for item in states if item.get("entity_id") == entity_id), None
+    )
+    state = summarize_state(raw_state or await ha.state(entity_id))
+    expected = GOSUND_SWITCH_ACTIONS[action]
+    _audit_tool(
+        "control_gosund_switch",
+        entity_id=entity_id,
+        action=action,
+        device_id=device["id"],
+        confirmed=state.get("state") == expected,
+    )
+    return {
+        "status": "completed",
+        "action": action,
+        "expected_state": expected,
+        "confirmed": state.get("state") == expected,
+        "state": state,
+        "device": {
+            "id": updated["id"],
+            "name": updated["name"],
+            "area_id": updated["area_id"],
+            "readings": updated["readings"],
+        },
+    }
 
 
 @mcp.tool(title="Set number entity value", annotations=IDEMPOTENT_WRITE)

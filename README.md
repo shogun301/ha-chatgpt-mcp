@@ -32,6 +32,10 @@ unrestricted service proxy.
   native schedule/upcoming-run reads, weather/skip decisions, exact-second zone
   or sequence starts, confirmed logical-run pause/resume/current-zone skip,
   and idempotent stop operations.
+- **Gosund plugs and switches:** registry-matched discovery of Gosund smart
+  plugs, power strips, and wall switches with their switch entities and
+  power/energy readings, plus exact-entity on/off control that fails closed
+  for any switch outside the configured Gosund devices.
 - **Energy and SolarEdge:** production, module comparison, power flow, energy
   breakdowns, storage summaries, telemetry, alerts, and a versioned Home
   Assistant bridge with privacy-filtered scalar entities and durable export
@@ -45,7 +49,7 @@ unrestricted service proxy.
 - **OAuth-native remote access:** authorization code flow with S256 PKCE,
   dynamic client registration, scoped access tokens, and MCP resource metadata.
 
-Version **2.7.12** currently advertises **120 tools**. See
+Version **2.7.13** currently advertises **123 tools**. See
 [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## Architecture
@@ -81,6 +85,7 @@ over a private network.
 | Media and cleaning        | Browse/play media, TTS, Cast dashboards, vacuum rooms and fan speed       | Read/write                               |
 | Irrigation                | Status, zones, history, schedules, exact runs, pause/resume/skip/stop | Read/write                               |
 | Organization              | Calendars, to-do lists, automations, notifications                        | Read/write                               |
+| Gosund devices            | Registry-matched plugs, strips, and switches; readings; exact on/off      | Read/write                               |
 | Energy                    | SolarEdge summaries, power flow, storage, telemetry, and alerts           | Read; optional authorization write       |
 | Operations                | Backups, capability drift, fixed routes, host/runtime, outages, LAN nodes | Read; backup creation is confirmed write |
 
@@ -170,6 +175,20 @@ Do not bind Uvicorn directly to a public interface.
 Entity-specific variables in `.env.example` map the generic tool surface to one
 deployment's presence, notification, vacuum, sprinkler, thermostat, and schedule
 entities. Keep real entity IDs in local configuration, not in Git.
+
+Gosund smart plugs, power strips, and wall switches reach Home Assistant through
+Tuya-family or locally flashed integrations, so the typed Gosund tools identify
+them from the device registry rather than from a service domain.
+`GOSUND_DEVICE_MARKERS` lists case-insensitive substrings (default `gosund`)
+matched against each device's manufacturer, model, and names; add product codes
+such as `wp3` or a household naming prefix when the integration reports a
+generic manufacturer. `GOSUND_DEVICE_IDS` optionally names exact device registry
+IDs from `list_devices`. `list_gosund_devices` and `get_gosund_device_status`
+report enabled switch entities and power, current, voltage, and energy readings
+for matched devices, and `control_gosund_switch` turns one exact switch entity
+on or off with readback, failing closed for any switch that is not an enabled
+entity of a matched device. Generic `switch` routing through `call_service`,
+`turn_on`, and `turn_off` is unchanged.
 
 Sprinkler controller entities and zone entities may use different prefixes;
 configure `SPRINKLER_ENTITY_PREFIX` and `SPRINKLER_ZONE_ENTITY_PREFIX`

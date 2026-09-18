@@ -139,3 +139,58 @@ SOLAREDGE_PORTAL_SITE_ID_FILE = (
     Path(_solaredge_portal_site_id_file) if _solaredge_portal_site_id_file else None
 )
 SOLAREDGE_PORTAL_TIMEZONE = _optional("SOLAREDGE_PORTAL_TIMEZONE")
+
+_GOSUND_DEVICE_ID_RE = re.compile(r"^[a-f0-9]{32}$")
+_GOSUND_MARKER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._/+-]{0,63}$")
+MAX_GOSUND_MARKERS = 20
+MAX_GOSUND_DEVICE_IDS = 50
+
+
+def parse_gosund_markers(value: str | None) -> tuple[str, ...]:
+    """Parse case-insensitive device-registry markers that identify Gosund devices."""
+    if value is None:
+        return ("gosund",)
+    markers: list[str] = []
+    for raw in value.split(","):
+        marker = raw.strip()
+        if not marker:
+            continue
+        if not _GOSUND_MARKER_RE.fullmatch(marker):
+            raise RuntimeError(
+                "GOSUND_DEVICE_MARKERS entries must be 1-64 plain printable characters"
+            )
+        folded = marker.casefold()
+        if folded not in markers:
+            markers.append(folded)
+    if not markers:
+        raise RuntimeError("GOSUND_DEVICE_MARKERS must list at least one marker")
+    if len(markers) > MAX_GOSUND_MARKERS:
+        raise RuntimeError(
+            f"GOSUND_DEVICE_MARKERS accepts at most {MAX_GOSUND_MARKERS} markers"
+        )
+    return tuple(markers)
+
+
+def parse_gosund_device_ids(value: str | None) -> frozenset[str]:
+    """Parse optional exact Home Assistant device registry IDs treated as Gosund devices."""
+    if value is None:
+        return frozenset()
+    device_ids: set[str] = set()
+    for raw in value.split(","):
+        device_id = raw.strip()
+        if not device_id:
+            continue
+        if not _GOSUND_DEVICE_ID_RE.fullmatch(device_id):
+            raise RuntimeError(
+                "GOSUND_DEVICE_IDS entries must be exact 32-character device registry IDs"
+            )
+        device_ids.add(device_id)
+    if len(device_ids) > MAX_GOSUND_DEVICE_IDS:
+        raise RuntimeError(
+            f"GOSUND_DEVICE_IDS accepts at most {MAX_GOSUND_DEVICE_IDS} devices"
+        )
+    return frozenset(device_ids)
+
+
+GOSUND_DEVICE_MARKERS = parse_gosund_markers(_optional("GOSUND_DEVICE_MARKERS"))
+GOSUND_DEVICE_IDS = parse_gosund_device_ids(_optional("GOSUND_DEVICE_IDS"))

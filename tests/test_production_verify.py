@@ -46,6 +46,7 @@ from scripts.production_mcp_verify import (
     DIAGNOSTIC_TOOLS,
     EXPECTED_TOOL_COUNT,
     EXPECTED_VERSION,
+    GOSUND_READ_REQUESTS,
     LAN_PROBE_SERVICES,
     NEW_CAPABILITY_TOOLS,
     SPRINKLER_COMMAND_TOOLS,
@@ -97,6 +98,8 @@ class ProductionVerifierCompatibilityTests(unittest.TestCase):
         source = Path("scripts/production_mcp_verify.py").read_text(encoding="utf-8")
         self.assertNotIn("refresh_sprinkler", SPRINKLER_READ_REQUESTS)
         self.assertTrue(SPRINKLER_COMMAND_TOOLS.isdisjoint(SPRINKLER_READ_REQUESTS))
+        self.assertNotIn("control_gosund_switch", GOSUND_READ_REQUESTS)
+        self.assertNotIn('session.call_tool("control_gosund_switch"', source)
         for name in SPRINKLER_COMMAND_TOOLS:
             self.assertNotIn(f'session.call_tool("{name}"', source)
 
@@ -123,6 +126,7 @@ class ProductionVerifierCompatibilityTests(unittest.TestCase):
                 "normalized_zone_ids": ["zone-1", "zone-2", "zone-3"],
             },
             "sprinkler_command_schemas_inspected": sorted(SPRINKLER_COMMAND_TOOLS),
+            "gosund_read_calls": {name: True for name in GOSUND_READ_REQUESTS},
         }
         report = _verification_report(read_only, {}, {})
         self.assertIs(report["read_only_scope"], read_only)
@@ -140,6 +144,11 @@ class ProductionVerifierCompatibilityTests(unittest.TestCase):
         missing_inventory["sprinkler_inventory"] = None
         with self.assertRaisesRegex(AssertionError, "inventory evidence is missing"):
             _verification_report(missing_inventory, {}, {})
+
+        missing_gosund = dict(read_only)
+        missing_gosund["gosund_read_calls"] = {}
+        with self.assertRaisesRegex(AssertionError, "Gosund acceptance"):
+            _verification_report(missing_gosund, {}, {})
 
     def test_verifier_uses_only_canonical_lan_services(self) -> None:
         self.assertTrue(set(LAN_PROBE_SERVICES).issubset(SERVICE_PORTS))
@@ -291,7 +300,7 @@ class ProductionVerifierSchemaTests(unittest.IsolatedAsyncioTestCase):
     async def test_all_production_verifier_requests_match_advertised_schemas(self) -> None:
         tools = {tool.name: tool for tool in await mcp.list_tools()}
         contract = json.loads(
-            Path("tests/fixtures/server-contract-2.7.12.json").read_text(encoding="utf-8")
+            Path("tests/fixtures/server-contract-2.7.13.json").read_text(encoding="utf-8")
         )
         self.assertEqual(EXPECTED_VERSION, SERVER_VERSION)
         self.assertEqual(EXPECTED_TOOL_COUNT, len(tools))
@@ -346,6 +355,7 @@ class ProductionVerifierSchemaTests(unittest.IsolatedAsyncioTestCase):
             "get_capability_sync_status": {"refresh": True},
             **DIAGNOSTIC_REQUESTS,
             **SPRINKLER_READ_REQUESTS,
+            **GOSUND_READ_REQUESTS,
         }
         for name, arguments in requests.items():
             with self.subTest(tool=name):

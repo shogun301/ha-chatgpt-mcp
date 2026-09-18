@@ -95,8 +95,8 @@ class CloudToolSurfaceTests(unittest.TestCase):
     def test_server_advertises_expanded_typed_surface(self) -> None:
         tools = asyncio.run(mcp.list_tools())
         names = {tool.name for tool in tools}
-        self.assertEqual(mcp.version, "2.7.12")
-        self.assertEqual(len(names), 120)
+        self.assertEqual(mcp.version, "2.7.13")
+        self.assertEqual(len(names), 123)
         self.assertTrue(
             {
                 "get_home_overview",

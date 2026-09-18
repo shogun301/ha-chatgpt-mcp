@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.7.13 - 2026-09-18
+
+- Add three typed Gosund tools: `list_gosund_devices` and `get_gosund_device_status` report registry-matched Gosund plugs, power strips, and wall switches with their enabled switch entities and power, current, voltage, and energy readings; `control_gosund_switch` turns one exact switch entity on or off and reads the result back.
+- Identify Gosund devices from the Home Assistant device registry through configurable case-insensitive `GOSUND_DEVICE_MARKERS` and optional exact `GOSUND_DEVICE_IDS`; control fails closed for any switch outside a matched device, and the generic service allowlist is unchanged.
+- Exercise the new read tool during read-only production acceptance and advertise 123 typed tools.
+
 ## 2.7.12 - 2026-09-08
 
 - Preserve the two already-live read-only CHEF iQ sensor tools while rebuilding MCP; no provider client or credentials are included.

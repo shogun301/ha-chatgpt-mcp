@@ -38,10 +38,13 @@ DIAGNOSTIC_TOOLS = (
     "probe_lan_node",
 )
 LAN_PROBE_SERVICES = ("dns", "router_ssh")
-EXPECTED_VERSION = "2.7.12"
-EXPECTED_TOOL_COUNT = 120
-CONTRACT_PATH = Path("/app/tests/fixtures/server-contract-2.7.12.json")
+EXPECTED_VERSION = "2.7.13"
+EXPECTED_TOOL_COUNT = 123
+CONTRACT_PATH = Path("/app/tests/fixtures/server-contract-2.7.13.json")
 NEW_CAPABILITY_TOOLS = {
+    "list_gosund_devices",
+    "get_gosund_device_status",
+    "control_gosund_switch",
     "get_sprinkler_schedule",
     "preview_sprinkler_schedule_update",
     "update_sprinkler_schedule",
@@ -99,6 +102,9 @@ SPRINKLER_READ_REQUESTS: dict[str, dict[str, Any]] = {
     "get_sprinkler_upcoming_runs": {},
     "get_sprinkler_weather_and_decisions": {},
     "get_sprinkler_controller_diagnostics": {},
+}
+GOSUND_READ_REQUESTS: dict[str, dict[str, Any]] = {
+    "list_gosund_devices": {"limit": 50},
 }
 SPRINKLER_COMMAND_TOOLS = {
     "refresh_sprinkler",
@@ -594,6 +600,7 @@ async def _session(scope: str, *, diagnostics_allowed: bool) -> dict[str, Any]:
                             ) from exc
                     results[name] = not is_error
 
+                gosund_read_calls: dict[str, bool] = {}
                 sprinkler_read_calls: dict[str, bool] = {}
                 sprinkler_payloads: dict[str, dict[str, Any]] = {}
                 sprinkler_inventory: dict[str, Any] | None = None
@@ -622,6 +629,22 @@ async def _session(scope: str, *, diagnostics_allowed: bool) -> dict[str, Any]:
                         integration_snapshot,
                         configured_count=config.SPRINKLER_ZONE_COUNT,
                     )
+                    for name, arguments in GOSUND_READ_REQUESTS.items():
+                        result = await session.call_tool(name, arguments)
+                        if bool(getattr(result, "is_error", False)):
+                            raise AssertionError(f"{name} failed read-only production acceptance")
+                        try:
+                            _assert_sanitized(_serialized_result(result))
+                        except AssertionError as exc:
+                            raise AssertionError(
+                                f"{name} returned unsafe read output: {exc}"
+                            ) from exc
+                        payload = _structured_result(result)
+                        if not isinstance(payload.get("devices"), list) or not isinstance(
+                            payload.get("count"), int
+                        ):
+                            raise AssertionError(f"{name} returned an unexpected inventory shape")
+                        gosund_read_calls[name] = True
                 return {
                     "version": initialized.server_info.version,
                     "tool_count": len(tools.tools),
@@ -630,6 +653,7 @@ async def _session(scope: str, *, diagnostics_allowed: bool) -> dict[str, Any]:
                     "sprinkler_read_calls": sprinkler_read_calls,
                     "sprinkler_inventory": sprinkler_inventory,
                     "sprinkler_command_schemas_inspected": sorted(SPRINKLER_COMMAND_TOOLS),
+                    "gosund_read_calls": gosund_read_calls,
                 }
 
 
@@ -664,6 +688,13 @@ def _verification_report(
         SPRINKLER_COMMAND_TOOLS
     ):
         raise AssertionError("sprinkler command schema inspection is incomplete")
+    gosund_calls = read_only.get("gosund_read_calls")
+    if (
+        not isinstance(gosund_calls, dict)
+        or set(gosund_calls) != set(GOSUND_READ_REQUESTS)
+        or not all(value is True for value in gosund_calls.values())
+    ):
+        raise AssertionError("read-only Gosund acceptance did not execute every read")
     return {
         "public_authentication": "verified",
         "insufficient_scope_rejected": all(
